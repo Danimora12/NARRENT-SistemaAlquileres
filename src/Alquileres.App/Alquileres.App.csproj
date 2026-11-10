@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Permite compilar también desde Linux/macOS; en Windows no afecta. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <AssemblyName>SistemaAlquileres</AssemblyName>
+    <RootNamespace>Alquileres.App</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Product>Sistema de Alquileres</Product>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ícono también incrustado para usarlo en la ventana -->
+    <EmbeddedResource Include="Assets\app.ico" LogicalName="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Alquileres.Core\Alquileres.Core.csproj" />
+  </ItemGroup>
+
+</Project>
