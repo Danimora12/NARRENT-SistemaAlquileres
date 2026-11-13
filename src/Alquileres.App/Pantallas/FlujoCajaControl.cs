@@ -2,7 +2,8 @@ using Alquileres.Core;
 
 namespace Alquileres.App.Pantallas;
 
-internal sealed class ReporteControl : UserControl, IRefrescable
+/// <summary>Flujo de caja mensual (antes "Reporte mensual (IVA)").</summary>
+internal sealed class FlujoCajaControl : UserControl, IRefrescable
 {
     private readonly ReporteServicio _reporte;
     private readonly NumericUpDown _anio = Ui.Entero(2000, 2100, DateTime.Today.Year);
@@ -11,24 +12,28 @@ internal sealed class ReporteControl : UserControl, IRefrescable
     private readonly Label _totalAnio = Ui.Etiqueta("", Ui.FuenteNegrita);
     private readonly Label _tituloDetalle = Ui.Etiqueta("Detalle del mes", Ui.FuenteNegrita);
 
-    public ReporteControl(BaseDatos db)
+    public FlujoCajaControl(BaseDatos db)
     {
         _reporte = new ReporteServicio(db);
 
         Ui.Columna(_gridMeses, "Mes", 120);
         Ui.Columna(_gridMeses, "Órdenes", 70, derecha: true);
-        Ui.Columna(_gridMeses, "Total cobrado", 130, derecha: true);
-        Ui.Columna(_gridMeses, "Base imponible", 130, derecha: true);
-        Ui.Columna(_gridMeses, "IVA cobrado 13 %", 130, derecha: true);
+        Ui.Columna(_gridMeses, "Ingresos brutos", 130, derecha: true);
+        Ui.Columna(_gridMeses, "Ingresos netos", 130, derecha: true);
+        Ui.Columna(_gridMeses, "Total IVA 13 %", 130, derecha: true);
+        Ui.Columna(_gridMeses, "Gastos", 120, derecha: true);
+        Ui.Columna(_gridMeses, "Utilidad", 130, derecha: true);
+        Ui.Columna(_gridMeses, "IVA de gastos", 110, derecha: true);
+        Ui.Columna(_gridMeses, "IVA neto a pagar", 130, derecha: true);
         _gridMeses.SelectionChanged += (_, _) => Ui.Intentar(MostrarDetalle);
 
-        Ui.Columna(_gridDetalle, "N°", 60);
+        Ui.Columna(_gridDetalle, "N°", 85);
         Ui.Columna(_gridDetalle, "Fecha", 80);
         Ui.Columna(_gridDetalle, "Cliente", 220);
         Ui.Columna(_gridDetalle, "Estado", 80);
-        Ui.Columna(_gridDetalle, "Total", 110, derecha: true);
-        Ui.Columna(_gridDetalle, "Base", 110, derecha: true);
-        Ui.Columna(_gridDetalle, "IVA", 100, derecha: true);
+        Ui.Columna(_gridDetalle, "Ingresos brutos", 110, derecha: true);
+        Ui.Columna(_gridDetalle, "Ingresos netos", 110, derecha: true);
+        Ui.Columna(_gridDetalle, "IVA 13 %", 100, derecha: true);
 
         _anio.ValueChanged += (_, _) => Ui.Intentar(Refrescar);
 
@@ -38,7 +43,12 @@ internal sealed class ReporteControl : UserControl, IRefrescable
             Ui.Boton("Exportar año a Excel…", (_, _) => ExportarAnio()));
 
         var nota = Ui.Etiqueta(
-            "El monto es IVA COBRADO (débito fiscal). El IVA a pagar en el formulario 150 de TRIBU-CR es este monto menos el IVA de las compras del negocio (crédito fiscal). Las órdenes anuladas no se cuentan.");
+            "Ingresos brutos = lo cobrado con IVA incluido (ya con descuentos). Ingresos netos = sin IVA. El mes lo define la fecha de la orden. " +
+            "El Total IVA es el IVA cobrado (débito fiscal): el IVA a pagar en el formulario 150 de TRIBU-CR es este monto menos el IVA de las compras del negocio. " +
+            "No se cuentan órdenes anuladas ni eliminadas. Gastos = gastos del mes sin el IVA de sus facturas (pestaña Gastos). " +
+            "Utilidad = ingresos netos − gastos, antes del impuesto sobre la renta. " +
+            "IVA neto a pagar = Total IVA − IVA de las facturas de gastos (crédito fiscal); si es negativo, es saldo a favor. " +
+            "Es una estimación: solo cuenta como crédito el IVA de facturas electrónicas a nombre del negocio. Confírmelo con el contador.");
         nota.ForeColor = Color.DimGray;
         nota.MaximumSize = new Size(1100, 0);
 
@@ -69,19 +79,31 @@ internal sealed class ReporteControl : UserControl, IRefrescable
         foreach (var m in meses)
         {
             int i = _gridMeses.Rows.Add(m.NombreMes, m.CantidadOrdenes, Ui.Fmt(m.TotalCentimos),
-                Ui.Fmt(m.BaseCentimos), Ui.Fmt(m.IvaCentimos));
+                Ui.Fmt(m.BaseCentimos), Ui.Fmt(m.IvaCentimos), Ui.Fmt(m.GastosCentimos), FmtUtilidad(m.UtilidadCentimos),
+                Ui.Fmt(m.IvaGastosCentimos), FmtIvaNeto(m.IvaNetoCentimos));
             _gridMeses.Rows[i].Tag = m;
-            if (m.CantidadOrdenes == 0) _gridMeses.Rows[i].DefaultCellStyle.ForeColor = Color.Gray;
+            if (m.CantidadOrdenes == 0 && m.GastosCentimos == 0) _gridMeses.Rows[i].DefaultCellStyle.ForeColor = Color.Gray;
+            var celdaUtilidad = _gridMeses.Rows[i].Cells[6];
+            celdaUtilidad.Style.Font = Ui.FuenteNegrita;
+            if (m.UtilidadCentimos < 0) celdaUtilidad.Style.ForeColor = Color.Firebrick;
+            else if (m.UtilidadCentimos > 0) celdaUtilidad.Style.ForeColor = Color.ForestGreen;
+            _gridMeses.Rows[i].Cells[8].Style.Font = Ui.FuenteNegrita;
         }
         _totalAnio.Text = $"Total {Anio}:  {meses.Sum(m => m.CantidadOrdenes)} órdenes · " +
-                          $"Cobrado {Ui.Fmt(meses.Sum(m => m.TotalCentimos))} · " +
-                          $"Base {Ui.Fmt(meses.Sum(m => m.BaseCentimos))} · " +
-                          $"IVA {Ui.Fmt(meses.Sum(m => m.IvaCentimos))}";
+                          $"Ingresos brutos {Ui.Fmt(meses.Sum(m => m.TotalCentimos))} · " +
+                          $"Ingresos netos {Ui.Fmt(meses.Sum(m => m.BaseCentimos))} · " +
+                          $"Total IVA {Ui.Fmt(meses.Sum(m => m.IvaCentimos))} · " +
+                          $"Gastos {Ui.Fmt(meses.Sum(m => m.GastosCentimos))} · " +
+                          $"Utilidad {FmtUtilidad(meses.Sum(m => m.UtilidadCentimos))} · " +
+                          $"IVA neto {FmtIvaNeto(meses.Sum(m => m.IvaNetoCentimos))}";
 
         _gridMeses.ClearSelection();
         _gridMeses.CurrentCell = _gridMeses.Rows[mesAntes - 1].Cells[0];
         MostrarDetalle();
     }
+
+    private static string FmtUtilidad(long centimos) => centimos < 0 ? "−" + Ui.Fmt(-centimos) : Ui.Fmt(centimos);
+    private static string FmtIvaNeto(long centimos) => centimos < 0 ? $"{Ui.Fmt(-centimos)} a favor" : Ui.Fmt(centimos);
 
     private void MostrarDetalle()
     {
@@ -112,21 +134,21 @@ internal sealed class ReporteControl : UserControl, IRefrescable
             Ui.Info("Seleccione un mes en la tabla.");
             return;
         }
-        if (PedirRuta($"IVA_{Anio}-{mes:D2}_{Dinero.NombreMes(mes)}.xlsx") is not { } ruta) return;
+        if (PedirRuta($"FlujoCaja_{Anio}-{mes:D2}_{Dinero.NombreMes(mes)}.xlsx") is not { } ruta) return;
         Ui.Intentar(() =>
         {
             _reporte.ExportarMesExcel(Anio, mes, ruta);
-            Ui.Info("Reporte exportado:\n" + ruta);
+            Ui.Info("Flujo de caja exportado:\n" + ruta);
         });
     }
 
     private void ExportarAnio()
     {
-        if (PedirRuta($"IVA_{Anio}_resumen_anual.xlsx") is not { } ruta) return;
+        if (PedirRuta($"FlujoCaja_{Anio}_resumen_anual.xlsx") is not { } ruta) return;
         Ui.Intentar(() =>
         {
             _reporte.ExportarAnioExcel(Anio, ruta);
-            Ui.Info("Reporte exportado:\n" + ruta);
+            Ui.Info("Flujo de caja exportado:\n" + ruta);
         });
     }
 }

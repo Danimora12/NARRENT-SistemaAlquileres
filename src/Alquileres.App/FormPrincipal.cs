@@ -27,10 +27,12 @@ internal sealed class FormPrincipal : Form
 
         Agregar("Nueva orden", new NuevaOrdenControl(db));
         Agregar("Órdenes", new OrdenesControl(db));
-        Agregar("Reporte mensual (IVA)", new ReporteControl(db));
         Agregar("Productos", new ProductosControl(db));
         Agregar("Clientes", new ClientesControl(db));
+        Agregar("Gastos", new GastosControl(db));
+        Agregar("Flujo de caja", new FlujoCajaControl(db));
         Agregar("Respaldos", new RespaldosControl(db, this));
+        Agregar("Logs", new LogsControl(db));
 
         _tabs.SelectedIndexChanged += (_, _) => RefrescarPestanaActual();
         Controls.Add(_tabs);

@@ -12,13 +12,12 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
     private readonly ComboBox _cboCliente = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320, Font = Ui.Fuente };
     private readonly DateTimePicker _dtpFecha = Ui.Fecha();
     private readonly DateTimePicker _dtpInicio = Ui.Fecha();
-    private readonly DateTimePicker _dtpFin = Ui.Fecha(opcional: true);
     private readonly TextBox _txtNotas = Ui.Texto(500);
 
     private readonly ComboBox _cboProducto = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220, Font = Ui.Fuente };
-    private readonly NumericUpDown _nudPrecio = Ui.Monto();
-    private readonly NumericUpDown _nudCantidad = Ui.Entero(1, 1000);
-    private readonly NumericUpDown _nudDias = Ui.Entero(1, 3650);
+    private readonly CampoMonto _precio = new(120);
+    private readonly CampoEntero _cantidad = new(1, 1000);
+    private readonly CampoEntero _dias = new(1, 3650);
 
     private readonly DataGridView _grid = Ui.Grid();
     private readonly Label _lblBase = Ui.Etiqueta("₡0,00", Ui.FuenteNegrita);
@@ -44,35 +43,25 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         Ui.Columna(_grid, "Base", 110, derecha: true);
         Ui.Columna(_grid, "IVA", 100, derecha: true);
 
-        var grupoDatos = new GroupBox { Text = "Datos de la orden", AutoSize = true, Font = Ui.FuenteNegrita, Padding = new Padding(8) };
-        var pilaDatos = new FlowLayoutPanel { Location = new Point(8, 24), AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Font = Ui.Fuente };
-        pilaDatos.Controls.Add(Ui.Fila(
-            Ui.Etiqueta("Cliente:"), _cboCliente,
-            Ui.Boton("Nuevo cliente…", (_, _) => NuevoCliente())));
-        pilaDatos.Controls.Add(Ui.Fila(
-            Ui.Etiqueta("Fecha de la orden:"), _dtpFecha,
-            Ui.Etiqueta("   Inicio del alquiler:"), _dtpInicio,
-            Ui.Etiqueta("   Devolución estimada:"), _dtpFin));
-        pilaDatos.Controls.Add(Ui.Fila(Ui.Etiqueta("Notas:"), _txtNotas));
-        grupoDatos.Controls.Add(pilaDatos);
+        var grupoDatos = Ui.Grupo("Datos de la orden",
+            Ui.Fila(Ui.Etiqueta("Cliente:"), _cboCliente, Ui.Boton("Nuevo cliente…", (_, _) => NuevoCliente())),
+            Ui.Fila(Ui.Etiqueta("Fecha de la orden:"), _dtpFecha, Ui.Etiqueta("   Inicio del alquiler:"), _dtpInicio),
+            Ui.Fila(Ui.Etiqueta("Notas:"), _txtNotas));
 
-        var grupoProducto = new GroupBox { Text = "Agregar producto", AutoSize = true, Font = Ui.FuenteNegrita, Padding = new Padding(8) };
-        var filaProducto = Ui.Fila(
-            Ui.Etiqueta("Producto:"), _cboProducto,
-            Ui.Etiqueta("Precio (IVA incl.):"), _nudPrecio,
-            Ui.Etiqueta("Cantidad:"), _nudCantidad,
-            Ui.Etiqueta("Días:"), _nudDias,
-            Ui.Boton("Agregar a la orden", (_, _) => AgregarLinea(), principal: true));
-        filaProducto.Font = Ui.Fuente;
-        filaProducto.Location = new Point(8, 24);
-        grupoProducto.Controls.Add(filaProducto);
+        var grupoProducto = Ui.Grupo("Agregar producto",
+            Ui.Fila(
+                Ui.Etiqueta("Producto:"), _cboProducto,
+                Ui.Etiqueta("Precio (IVA incl.) ₡:"), _precio,
+                Ui.Etiqueta("Cantidad:"), _cantidad,
+                Ui.Etiqueta("Días:"), _dias,
+                Ui.Boton("Agregar a la orden", (_, _) => AgregarLinea(), principal: true)));
 
         var totales = new TableLayoutPanel { AutoSize = true, ColumnCount = 2, Anchor = AnchorStyles.Right };
         totales.Controls.Add(Ui.Etiqueta("Base imponible (sin IVA):"), 0, 0);
         totales.Controls.Add(_lblBase, 1, 0);
         totales.Controls.Add(Ui.Etiqueta("IVA 13 % (incluido):"), 0, 1);
         totales.Controls.Add(_lblIva, 1, 1);
-        totales.Controls.Add(Ui.Etiqueta("TOTAL A PAGAR:", Ui.FuenteTotal), 0, 2);
+        totales.Controls.Add(Ui.Etiqueta("TOTAL:", Ui.FuenteTotal), 0, 2);
         totales.Controls.Add(_lblTotal, 1, 2);
 
         var pie = new TableLayoutPanel { AutoSize = true, ColumnCount = 2 };
@@ -82,17 +71,17 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
             Ui.Boton("Quitar línea seleccionada", (_, _) => QuitarLinea()),
             Ui.Boton("Limpiar orden", (_, _) => { if (_lineas.Count == 0 || Ui.Confirmar("¿Descartar la orden actual?")) Limpiar(); })), 0, 0);
         pie.Controls.Add(totales, 1, 0);
-        pie.Controls.Add(new Panel(), 0, 1);
-        pie.Controls.Add(Ui.Fila(Ui.Boton("Guardar orden", (_, _) => Guardar(), principal: true)), 1, 1);
+        var nota = Ui.Etiqueta("El descuento y el pago adelantado se indican al confirmar.");
+        nota.ForeColor = Color.DimGray;
+        pie.Controls.Add(nota, 0, 1);
+        pie.Controls.Add(Ui.Fila(Ui.Boton("Confirmar orden", (_, _) => Confirmar(), principal: true)), 1, 1);
 
         Controls.Add(Ui.Pila(grupoDatos, grupoProducto, _grid, pie));
 
         _cboProducto.SelectedIndexChanged += (_, _) =>
         {
-            if (_cboProducto.SelectedItem is Producto p) _nudPrecio.Value = Math.Min(p.PrecioConIva, _nudPrecio.Maximum);
+            if (_cboProducto.SelectedItem is Producto p) _precio.Centimos = p.PrecioConIvaCentimos;
         };
-        _dtpInicio.ValueChanged += (_, _) => SugerirDias();
-        _dtpFin.ValueChanged += (_, _) => SugerirDias();
     }
 
     public void Refrescar()
@@ -120,22 +109,15 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         }
     }
 
-    private void SugerirDias()
-    {
-        if (!_dtpFin.Checked) return;
-        int dias = (_dtpFin.Value.Date - _dtpInicio.Value.Date).Days;
-        _nudDias.Value = Math.Clamp(dias, 1, (int)_nudDias.Maximum);
-    }
-
     private void NuevoCliente()
     {
-        using var dlg = new ClienteDialog(new Cliente());
+        var nuevo = new Cliente();
+        using var dlg = new ClienteDialog(nuevo, c => _clientes.Guardar(c));
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         Ui.Intentar(() =>
         {
-            _clientes.Guardar(dlg.Cliente);
             Refrescar();
-            Seleccionar(_cboCliente, dlg.Cliente.Id);
+            Seleccionar(_cboCliente, nuevo.Id);
         });
     }
 
@@ -146,19 +128,19 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
             Ui.Info("Seleccione un producto. Si no aparece ninguno, revise la pestaña Productos.");
             return;
         }
-        if (_nudPrecio.Value <= 0 && !Ui.Confirmar("El precio es ₡0. ¿Agregar de todas formas?")) return;
+        if (_precio.Colones <= 0 && !Ui.Confirmar("El precio es ₡0. ¿Agregar de todas formas?")) return;
 
         var linea = new LineaOrden
         {
             ProductoId = p.Id,
             ProductoNombre = p.Nombre,
-            PrecioUnitarioCentimos = Dinero.ACentimos(_nudPrecio.Value),
-            Cantidad = (int)_nudCantidad.Value,
-            Dias = (int)_nudDias.Value
+            PrecioUnitarioCentimos = _precio.Centimos,
+            Cantidad = _cantidad.Valor,
+            Dias = _dias.Valor
         };
         linea.Calcular();
         _lineas.Add(linea);
-        _nudCantidad.Value = 1;
+        _cantidad.Valor = 1;
         MostrarLineas();
     }
 
@@ -185,23 +167,54 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         _lblTotal.Text = Ui.Fmt(_lineas.Sum(l => l.TotalCentimos));
     }
 
-    private void Guardar()
+    /// <summary>Abre la ventana de descuento + pago adelantado y, si se confirma, guarda la orden.</summary>
+    private void Confirmar()
     {
-        Ui.Intentar(() =>
+        if (_cboCliente.SelectedItem is not Cliente cliente) { Ui.Info("Seleccione un cliente."); _cboCliente.Focus(); return; }
+        if (_lineas.Count == 0) { Ui.Info("Agregue al menos un producto a la orden."); return; }
+
+        using var dlg = new ConfirmarOrdenDialog(_lineas, cliente.Nombre, _dtpFecha.Value.Date);
+        if (dlg.ShowDialog(this) != DialogResult.OK)
+        {
+            QuitarDescuentos();
+            return;
+        }
+
+        try
         {
             var orden = new Orden
             {
-                ClienteId = (_cboCliente.SelectedItem as Cliente)?.Id ?? 0,
+                ClienteId = cliente.Id,
                 Fecha = _dtpFecha.Value.Date,
                 FechaInicio = _dtpInicio.Value.Date,
-                FechaFin = _dtpFin.Checked ? _dtpFin.Value.Date : null,
                 Notas = _txtNotas.Text,
                 Lineas = _lineas.ToList()
             };
-            _ordenes.Crear(orden);
-            Ui.Info($"Orden N° {orden.Numero} guardada.\n\nTotal a pagar: {Ui.Fmt(orden.TotalCentimos)}\n(IVA incluido: {Ui.Fmt(orden.IvaCentimos)})");
+            _ordenes.Crear(orden, dlg.Pago);
+
+            string mensaje = $"Orden N° {orden.Numero} confirmada.\n\nTotal: {Ui.Fmt(orden.TotalCentimos)}";
+            if (orden.DescuentoCentimos > 0) mensaje += $"  (descuento {Ui.Fmt(orden.DescuentoCentimos)})";
+            mensaje += $"\nPagado: {Ui.Fmt(orden.PagadoCentimos)}" +
+                       (orden.PagadoCentimos > 0 ? $" por {dlg.Pago.MetodoTexto}" : "") +
+                       $"\nSaldo pendiente: {Ui.Fmt(orden.SaldoCentimos)}";
+            Ui.Info(mensaje);
             Limpiar();
-        });
+        }
+        catch (Exception ex)
+        {
+            QuitarDescuentos();
+            Ui.MostrarError(ex);
+        }
+    }
+
+    private void QuitarDescuentos()
+    {
+        foreach (var l in _lineas)
+        {
+            l.DescuentoPct = 0;
+            l.Calcular();
+        }
+        MostrarLineas();
     }
 
     private void Limpiar()
@@ -210,8 +223,7 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         MostrarLineas();
         _cboCliente.SelectedIndex = -1;
         _dtpFecha.Value = _dtpInicio.Value = DateTime.Today;
-        _dtpFin.Checked = false;
         _txtNotas.Clear();
-        _nudCantidad.Value = _nudDias.Value = 1;
+        _cantidad.Valor = _dias.Valor = 1;
     }
 }

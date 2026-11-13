@@ -8,7 +8,7 @@ namespace Alquileres.Core;
 /// </summary>
 public class BaseDatos
 {
-    private const int VersionEsquema = 1;
+    private const int VersionEsquema = 3;
 
     public string RutaArchivo { get; }
 
@@ -17,7 +17,11 @@ public class BaseDatos
         RutaArchivo = Path.GetFullPath(rutaArchivo);
     }
 
-    /// <summary>Carpeta por defecto: %LOCALAPPDATA%\SistemaAlquileres</summary>
+    /// <summary>
+    /// Carpeta por defecto: %LOCALAPPDATA%\SistemaAlquileres. Se conserva el nombre
+    /// original (aunque el programa ahora se llame NARRENT) para que al actualizar
+    /// el .exe el cliente siga viendo sus datos.
+    /// </summary>
     public static string CarpetaDatosPorDefecto =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SistemaAlquileres");
 
@@ -44,7 +48,11 @@ public class BaseDatos
         return cn;
     }
 
-    /// <summary>Crea la carpeta, el archivo y las tablas si no existen.</summary>
+    /// <summary>
+    /// Crea la carpeta, el archivo y las tablas si no existen, y actualiza bases
+    /// de versiones anteriores paso a paso (v1 → v2). Cada paso va en su propia
+    /// transacción: si algo falla, la base queda como estaba.
+    /// </summary>
     public void Inicializar()
     {
         Directory.CreateDirectory(CarpetaDatos);
@@ -53,7 +61,41 @@ public class BaseDatos
         long version = Escalar<long>(cn, "PRAGMA user_version;");
         if (version >= VersionEsquema) return;
 
+        if (version < 1) Migrar(cn, 1, CrearEsquemaV1);
+        if (version < 2) Migrar(cn, 2, MigrarAV2);
+        if (version < 3) Migrar(cn, 3, MigrarAV3);
+    }
+
+    /// <summary>v3: registro de gastos de la empresa (para la utilidad del flujo de caja).</summary>
+    private static void MigrarAV3(SqliteConnection cn, SqliteTransaction tx)
+    {
+        Ejecutar(cn, tx, """
+            CREATE TABLE gastos (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha        TEXT    NOT NULL,                      -- yyyy-MM-dd
+                categoria    TEXT    NOT NULL,
+                descripcion  TEXT    NOT NULL,
+                proveedor    TEXT,
+                metodo       TEXT    NOT NULL CHECK (metodo IN ('Sinpe','Transferencia','Efectivo','Tarjeta')),
+                monto        INTEGER NOT NULL CHECK (monto > 0),    -- céntimos, total pagado
+                iva          INTEGER NOT NULL DEFAULT 0 CHECK (iva >= 0 AND iva <= monto),
+                creado_en    TEXT    NOT NULL
+            );
+            CREATE INDEX ix_gastos_fecha ON gastos(fecha);
+            """);
+    }
+
+    private static void Migrar(SqliteConnection cn, int versionDestino, Action<SqliteConnection, SqliteTransaction> pasos)
+    {
         using var tx = cn.BeginTransaction();
+        pasos(cn, tx);
+        Ejecutar(cn, tx, $"PRAGMA user_version = {versionDestino};");
+        tx.Commit();
+    }
+
+    /// <summary>Esquema original (v1). No se modifica: las mejoras van en migraciones.</summary>
+    private static void CrearEsquemaV1(SqliteConnection cn, SqliteTransaction tx)
+    {
         Ejecutar(cn, tx, """
             CREATE TABLE IF NOT EXISTS productos (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,9 +156,85 @@ public class BaseDatos
             for (int i = 1; i <= 4; i++)
                 Ejecutar(cn, tx, $"INSERT INTO productos (nombre, precio_con_iva) VALUES ('Producto {i}', 0);");
         }
+    }
 
-        Ejecutar(cn, tx, $"PRAGMA user_version = {VersionEsquema};");
-        tx.Commit();
+    /// <summary>
+    /// v2 (NARRENT): número de orden año+mes+consecutivo, papelera de órdenes,
+    /// descuentos por línea, pagos/abonos, inventario con características y logs.
+    /// </summary>
+    private static void MigrarAV2(SqliteConnection cn, SqliteTransaction tx)
+    {
+        Ejecutar(cn, tx, """
+            ALTER TABLE productos    ADD COLUMN inventario INTEGER NOT NULL DEFAULT 0 CHECK (inventario >= 0);
+
+            ALTER TABLE ordenes      ADD COLUMN numero             TEXT;
+            ALTER TABLE ordenes      ADD COLUMN eliminada          INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE ordenes      ADD COLUMN eliminada_en       TEXT;
+            ALTER TABLE ordenes      ADD COLUMN eliminada_por      TEXT;
+            ALTER TABLE ordenes      ADD COLUMN motivo_eliminacion TEXT;
+
+            ALTER TABLE orden_lineas ADD COLUMN descuento_pct INTEGER NOT NULL DEFAULT 0 CHECK (descuento_pct BETWEEN 0 AND 15);
+            ALTER TABLE orden_lineas ADD COLUMN descuento     INTEGER NOT NULL DEFAULT 0 CHECK (descuento >= 0);  -- céntimos
+
+            CREATE TABLE producto_variantes (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                producto_id  INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+                descripcion  TEXT    NOT NULL,
+                cantidad     INTEGER NOT NULL CHECK (cantidad >= 0)
+            );
+
+            CREATE TABLE pagos (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                orden_id   INTEGER NOT NULL REFERENCES ordenes(id) ON DELETE CASCADE,
+                fecha      TEXT    NOT NULL,                     -- yyyy-MM-dd
+                metodo     TEXT    NOT NULL CHECK (metodo IN ('Sinpe','Transferencia','Efectivo','Tarjeta')),
+                monto      INTEGER NOT NULL CHECK (monto > 0),   -- céntimos
+                creado_en  TEXT    NOT NULL
+            );
+
+            CREATE TABLE logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha_hora  TEXT NOT NULL,                       -- yyyy-MM-dd HH:mm:ss
+                empleado    TEXT,
+                accion      TEXT NOT NULL,
+                referencia  TEXT NOT NULL,
+                detalle     TEXT NOT NULL
+            );
+
+            CREATE INDEX ix_variantes_producto ON producto_variantes(producto_id);
+            CREATE INDEX ix_pagos_orden        ON pagos(orden_id);
+            CREATE INDEX ix_logs_fecha         ON logs(fecha_hora);
+            """);
+
+        // Numerar las órdenes existentes con el nuevo formato, según su fecha.
+        var existentes = new List<(long Id, string Fecha)>();
+        using (var cmd = cn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT id, fecha FROM ordenes ORDER BY fecha, id;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) existentes.Add((r.GetInt64(0), r.GetString(1)));
+        }
+        var consecutivos = new Dictionary<string, int>();
+        foreach (var (id, fecha) in existentes)
+        {
+            string prefijo = Numeracion.Prefijo(LeerFecha(fecha));
+            int n = consecutivos[prefijo] = consecutivos.GetValueOrDefault(prefijo) + 1;
+            using var cmd = cn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE ordenes SET numero = $n WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$n", Numeracion.Formatear(prefijo, n));
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+
+        Ejecutar(cn, tx, "CREATE UNIQUE INDEX ux_ordenes_numero ON ordenes(numero);");
+
+        // El inventario se pone en 0 y el cliente lo completa en Productos.
+        LogRepositorio.Registrar(cn, tx, null, "Actualización a NARRENT v2", "Sistema",
+            existentes.Count == 0
+                ? "Base de datos actualizada."
+                : $"Base de datos actualizada. Se renumeraron {existentes.Count} órdenes existentes con el formato año-mes-consecutivo.");
     }
 
     internal static void Ejecutar(SqliteConnection cn, SqliteTransaction? tx, string sql)
@@ -137,6 +255,11 @@ public class BaseDatos
     }
 
     internal const string FormatoFecha = "yyyy-MM-dd";
+    internal const string FormatoFechaHora = "yyyy-MM-dd HH:mm:ss";
+
+    internal static string FechaHora(DateTime d) => d.ToString(FormatoFechaHora);
+    internal static DateTime LeerFechaHora(string s) =>
+        DateTime.ParseExact(s, FormatoFechaHora, System.Globalization.CultureInfo.InvariantCulture);
 
     internal static string Fecha(DateTime d) => d.ToString(FormatoFecha);
     internal static DateTime LeerFecha(string s) =>

@@ -3,13 +3,16 @@ using ClosedXML.Excel;
 namespace Alquileres.Core;
 
 /// <summary>
-/// Reporte mensual de ventas e IVA. Las órdenes anuladas no se cuentan.
-/// El monto es "IVA cobrado" (débito fiscal). El IVA a pagar en el formulario 150
-/// de TRIBU-CR se obtiene restando el IVA pagado en compras (crédito fiscal).
+/// Flujo de caja mensual: ingresos brutos (IVA incluido), ingresos netos (sin IVA)
+/// e IVA 13 %. No cuenta órdenes anuladas ni eliminadas. El mes lo define la fecha
+/// de la orden. El IVA es el cobrado (débito fiscal); el IVA a pagar en el
+/// formulario 150 de TRIBU-CR se obtiene restando el IVA de compras (crédito fiscal).
+/// Utilidad = ingresos netos − gastos sin IVA (los gastos van por su propia fecha).
 /// </summary>
 public class ReporteServicio(BaseDatos db)
 {
     private readonly OrdenRepositorio _ordenes = new(db);
+    private readonly GastoRepositorio _gastos = new(db);
 
     /// <summary>Devuelve los 12 meses del año, incluidos los meses sin ventas.</summary>
     public List<ResumenMensual> ResumenAnual(int anio)
@@ -24,7 +27,7 @@ public class ReporteServicio(BaseDatos db)
                        COALESCE(SUM(l.total), 0), COALESCE(SUM(l.base), 0), COALESCE(SUM(l.iva), 0)
                 FROM ordenes o
                 JOIN orden_lineas l ON l.orden_id = o.id
-                WHERE o.estado <> 'Anulada' AND substr(o.fecha, 1, 4) = $a
+                WHERE o.estado <> 'Anulada' AND o.eliminada = 0 AND substr(o.fecha, 1, 4) = $a
                 GROUP BY mes;
                 """;
             cmd.Parameters.AddWithValue("$a", anio.ToString("D4"));
@@ -36,14 +39,29 @@ public class ReporteServicio(BaseDatos db)
             }
         }
 
+        // Gastos del mes sin el IVA de las facturas (ese IVA es crédito fiscal, no costo).
+        var gastos = new Dictionary<int, (long Neto, long Iva)>();
+        using (var cn = db.Abrir())
+        using (var cmd = cn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT CAST(substr(fecha, 6, 2) AS INTEGER), COALESCE(SUM(monto - iva), 0), COALESCE(SUM(iva), 0)
+                FROM gastos WHERE substr(fecha, 1, 4) = $a GROUP BY 1;
+                """;
+            cmd.Parameters.AddWithValue("$a", anio.ToString("D4"));
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) gastos[r.GetInt32(0)] = (r.GetInt64(1), r.GetInt64(2));
+        }
+
         return Enumerable.Range(1, 12)
-            .Select(m => datos.TryGetValue(m, out var d) ? d : new ResumenMensual(anio, m, 0, 0, 0, 0))
+            .Select(m => (datos.TryGetValue(m, out var d) ? d : new ResumenMensual(anio, m, 0, 0, 0, 0))
+                with { GastosCentimos = gastos.GetValueOrDefault(m).Neto, IvaGastosCentimos = gastos.GetValueOrDefault(m).Iva })
             .ToList();
     }
 
     public ResumenMensual ResumenMes(int anio, int mes) => ResumenAnual(anio)[mes - 1];
 
-    /// <summary>Órdenes no anuladas del mes, para el detalle.</summary>
+    /// <summary>Órdenes no anuladas ni eliminadas del mes, para el detalle.</summary>
     public List<Orden> DetalleMes(int anio, int mes)
     {
         var desde = new DateTime(anio, mes, 1);
@@ -52,6 +70,14 @@ public class ReporteServicio(BaseDatos db)
             .Where(o => o.Estado != EstadoOrden.Anulada)
             .OrderBy(o => o.Fecha).ThenBy(o => o.Id)
             .ToList();
+    }
+
+    /// <summary>Gastos del mes, para el detalle y el Excel.</summary>
+    public List<Gasto> GastosMes(int anio, int mes)
+    {
+        var desde = new DateTime(anio, mes, 1);
+        return _gastos.Listar(desde, desde.AddMonths(1).AddDays(-1))
+            .OrderBy(g => g.Fecha).ThenBy(g => g.Id).ToList();
     }
 
     private const string FormatoMoneda = "\"₡\"#,##0.00";
@@ -64,16 +90,20 @@ public class ReporteServicio(BaseDatos db)
 
         using var wb = new XLWorkbook();
         var hr = wb.Worksheets.Add("Resumen");
-        hr.Cell(1, 1).Value = $"Reporte de IVA — {Dinero.NombreMes(mes)} {anio}";
+        hr.Cell(1, 1).Value = $"Flujo de caja — {Dinero.NombreMes(mes)} {anio}";
         hr.Cell(1, 1).Style.Font.Bold = true;
         hr.Cell(1, 1).Style.Font.FontSize = 14;
 
         var filas = new (string, XLCellValue, bool)[]
         {
             ("Órdenes (no anuladas)", resumen.CantidadOrdenes, false),
-            ("Total cobrado (IVA incluido)", Dinero.ADecimal(resumen.TotalCentimos), true),
-            ("Base imponible (ventas sin IVA)", Dinero.ADecimal(resumen.BaseCentimos), true),
-            ("IVA cobrado 13 % (débito fiscal)", Dinero.ADecimal(resumen.IvaCentimos), true),
+            ("Ingresos brutos (IVA incluido)", Dinero.ADecimal(resumen.TotalCentimos), true),
+            ("Ingresos netos (sin IVA)", Dinero.ADecimal(resumen.BaseCentimos), true),
+            ("Total IVA 13 % (débito fiscal)", Dinero.ADecimal(resumen.IvaCentimos), true),
+            ("Gastos (sin IVA)", Dinero.ADecimal(resumen.GastosCentimos), true),
+            ("Utilidad (ingresos netos − gastos)", Dinero.ADecimal(resumen.UtilidadCentimos), true),
+            ("IVA de gastos (crédito fiscal)", Dinero.ADecimal(resumen.IvaGastosCentimos), true),
+            ("IVA neto a pagar (negativo = saldo a favor)", Dinero.ADecimal(resumen.IvaNetoCentimos), true),
         };
         for (int i = 0; i < filas.Length; i++)
         {
@@ -82,13 +112,16 @@ public class ReporteServicio(BaseDatos db)
             if (filas[i].Item3) hr.Cell(3 + i, 2).Style.NumberFormat.Format = FormatoMoneda;
         }
         hr.Range(6, 1, 6, 2).Style.Font.Bold = true;
-        hr.Cell(8, 1).Value = "Nota: el IVA a pagar en el formulario 150 = IVA cobrado − IVA de compras (crédito fiscal).";
-        hr.Cell(8, 1).Style.Font.Italic = true;
-        hr.Cell(9, 1).Value = $"Generado: {DateTime.Now:dd/MM/yyyy HH:mm}";
+        hr.Range(8, 1, 8, 2).Style.Font.Bold = true;
+        hr.Range(10, 1, 10, 2).Style.Font.Bold = true;
+        hr.Cell(12, 1).Value = "Nota: el IVA neto es una estimación para el formulario 150; solo es crédito fiscal el IVA de facturas electrónicas " +
+                               "a nombre del negocio y relacionadas con su actividad. Confirme con su contador. La utilidad es antes del impuesto sobre la renta.";
+        hr.Cell(12, 1).Style.Font.Italic = true;
+        hr.Cell(13, 1).Value = $"Generado: {DateTime.Now:dd/MM/yyyy HH:mm}";
         hr.Columns(1, 2).AdjustToContents();
 
         var hd = wb.Worksheets.Add("Detalle");
-        string[] encabezados = { "N° orden", "Fecha", "Cliente", "Estado", "Total cobrado", "Base imponible", "IVA" };
+        string[] encabezados = { "N° orden", "Fecha", "Cliente", "Estado", "Ingresos brutos", "Ingresos netos", "IVA 13 %" };
         for (int c = 0; c < encabezados.Length; c++) hd.Cell(1, c + 1).Value = encabezados[c];
         hd.Row(1).Style.Font.Bold = true;
 
@@ -114,6 +147,33 @@ public class ReporteServicio(BaseDatos db)
         if (detalle.Count > 0) hd.Range(1, 1, fila - 1, 7).SetAutoFilter();
         hd.Columns().AdjustToContents();
 
+        var gastos = GastosMes(anio, mes);
+        var hg = wb.Worksheets.Add("Gastos");
+        string[] encGastos = { "Fecha", "Categoría", "Descripción", "Proveedor", "Método", "Monto", "IVA", "Monto sin IVA" };
+        for (int c = 0; c < encGastos.Length; c++) hg.Cell(1, c + 1).Value = encGastos[c];
+        hg.Row(1).Style.Font.Bold = true;
+        int fg = 2;
+        foreach (var g in gastos)
+        {
+            hg.Cell(fg, 1).Value = g.Fecha;
+            hg.Cell(fg, 1).Style.DateFormat.Format = "dd/MM/yyyy";
+            hg.Cell(fg, 2).Value = g.Categoria;
+            hg.Cell(fg, 3).Value = g.Descripcion;
+            hg.Cell(fg, 4).Value = g.Proveedor ?? "";
+            hg.Cell(fg, 5).Value = g.MetodoTexto;
+            hg.Cell(fg, 6).Value = Dinero.ADecimal(g.MontoCentimos);
+            hg.Cell(fg, 7).Value = Dinero.ADecimal(g.IvaCentimos);
+            hg.Cell(fg, 8).Value = Dinero.ADecimal(g.NetoCentimos);
+            fg++;
+        }
+        hg.Cell(fg, 5).Value = "TOTAL";
+        hg.Cell(fg, 6).Value = Dinero.ADecimal(gastos.Sum(g => g.MontoCentimos));
+        hg.Cell(fg, 7).Value = Dinero.ADecimal(gastos.Sum(g => g.IvaCentimos));
+        hg.Cell(fg, 8).Value = Dinero.ADecimal(gastos.Sum(g => g.NetoCentimos));
+        hg.Row(fg).Style.Font.Bold = true;
+        hg.Range(2, 6, fg, 8).Style.NumberFormat.Format = FormatoMoneda;
+        hg.Columns().AdjustToContents();
+
         wb.SaveAs(rutaArchivo);
     }
 
@@ -122,8 +182,8 @@ public class ReporteServicio(BaseDatos db)
     {
         var meses = ResumenAnual(anio);
         using var wb = new XLWorkbook();
-        var h = wb.Worksheets.Add($"Resumen {anio}");
-        string[] encabezados = { "Mes", "Órdenes", "Total cobrado", "Base imponible", "IVA cobrado" };
+        var h = wb.Worksheets.Add($"Flujo de caja {anio}");
+        string[] encabezados = { "Mes", "Órdenes", "Ingresos brutos", "Ingresos netos", "Total IVA 13 %", "Gastos", "Utilidad", "IVA de gastos", "IVA neto a pagar" };
         for (int c = 0; c < encabezados.Length; c++) h.Cell(1, c + 1).Value = encabezados[c];
         h.Row(1).Style.Font.Bold = true;
 
@@ -135,6 +195,10 @@ public class ReporteServicio(BaseDatos db)
             h.Cell(fila, 3).Value = Dinero.ADecimal(m.TotalCentimos);
             h.Cell(fila, 4).Value = Dinero.ADecimal(m.BaseCentimos);
             h.Cell(fila, 5).Value = Dinero.ADecimal(m.IvaCentimos);
+            h.Cell(fila, 6).Value = Dinero.ADecimal(m.GastosCentimos);
+            h.Cell(fila, 7).Value = Dinero.ADecimal(m.UtilidadCentimos);
+            h.Cell(fila, 8).Value = Dinero.ADecimal(m.IvaGastosCentimos);
+            h.Cell(fila, 9).Value = Dinero.ADecimal(m.IvaNetoCentimos);
             fila++;
         }
         h.Cell(fila, 1).Value = "TOTAL";
@@ -142,8 +206,12 @@ public class ReporteServicio(BaseDatos db)
         h.Cell(fila, 3).Value = Dinero.ADecimal(meses.Sum(m => m.TotalCentimos));
         h.Cell(fila, 4).Value = Dinero.ADecimal(meses.Sum(m => m.BaseCentimos));
         h.Cell(fila, 5).Value = Dinero.ADecimal(meses.Sum(m => m.IvaCentimos));
+        h.Cell(fila, 6).Value = Dinero.ADecimal(meses.Sum(m => m.GastosCentimos));
+        h.Cell(fila, 7).Value = Dinero.ADecimal(meses.Sum(m => m.UtilidadCentimos));
+        h.Cell(fila, 8).Value = Dinero.ADecimal(meses.Sum(m => m.IvaGastosCentimos));
+        h.Cell(fila, 9).Value = Dinero.ADecimal(meses.Sum(m => m.IvaNetoCentimos));
         h.Row(fila).Style.Font.Bold = true;
-        h.Range(2, 3, fila, 5).Style.NumberFormat.Format = FormatoMoneda;
+        h.Range(2, 3, fila, 9).Style.NumberFormat.Format = FormatoMoneda;
         h.Columns().AdjustToContents();
         wb.SaveAs(rutaArchivo);
     }

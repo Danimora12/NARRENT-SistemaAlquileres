@@ -13,7 +13,7 @@ internal abstract class DialogoBase : Form
         Padding = new Padding(12)
     };
 
-    protected DialogoBase(string titulo)
+    protected DialogoBase(string titulo, string textoAceptar = "Aceptar", string textoCancelar = "Cancelar")
     {
         Text = titulo;
         Font = Ui.Fuente;
@@ -24,8 +24,8 @@ internal abstract class DialogoBase : Form
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         ShowInTaskbar = false;
 
-        var aceptar = Ui.Boton("Aceptar", (_, _) => { if (Validar()) { DialogResult = DialogResult.OK; Close(); } }, principal: true);
-        var cancelar = Ui.Boton("Cancelar", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
+        var aceptar = Ui.Boton(textoAceptar, (_, _) => { if (Validar()) { DialogResult = DialogResult.OK; Close(); } }, principal: true);
+        var cancelar = Ui.Boton(textoCancelar, (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
         AcceptButton = aceptar;
         CancelButton = cancelar;
 
@@ -59,8 +59,31 @@ internal abstract class DialogoBase : Form
         _campos.Controls.Add(control, 1, fila);
     }
 
+    /// <summary>Control que ocupa todo el ancho (texto explicativo, grilla, recuadro).</summary>
+    protected void Bloque(Control control)
+    {
+        int fila = _campos.RowCount++;
+        _campos.Controls.Add(control, 0, fila);
+        _campos.SetColumnSpan(control, 2);
+    }
+
+    protected static Label Explicacion(string texto, int ancho = 460)
+    {
+        var l = Ui.Etiqueta(texto);
+        l.ForeColor = Color.DimGray;
+        l.MaximumSize = new Size(ancho, 0);
+        return l;
+    }
+
     /// <summary>Devuelve false para impedir que se cierre la ventana.</summary>
     protected virtual bool Validar() => true;
+
+    /// <summary>Ejecuta el guardado; si falla, muestra el error y deja la ventana abierta.</summary>
+    protected static bool IntentarGuardar(Action guardar)
+    {
+        try { guardar(); return true; }
+        catch (Exception ex) { Ui.MostrarError(ex); return false; }
+    }
 }
 
 internal sealed class ClienteDialog : DialogoBase
@@ -70,18 +93,22 @@ internal sealed class ClienteDialog : DialogoBase
     private readonly TextBox _telefono = Ui.Texto(200);
     private readonly TextBox _correo = Ui.Texto(320);
     private readonly TextBox _notas = Ui.Texto(320, multilinea: true);
+    private readonly Action<Cliente> _guardar;
 
     public Cliente Cliente { get; }
 
-    public ClienteDialog(Cliente cliente) : base(cliente.Id == 0 ? "Nuevo cliente" : "Editar cliente")
+    public ClienteDialog(Cliente cliente, Action<Cliente> guardar, string? empleado = null)
+        : base(cliente.Id == 0 ? "Nuevo cliente" : "Editar cliente", "Guardar")
     {
         Cliente = cliente;
+        _guardar = guardar;
         _nombre.Text = cliente.Nombre;
         _identificacion.Text = cliente.Identificacion;
         _telefono.Text = cliente.Telefono;
         _correo.Text = cliente.Correo;
         _notas.Text = cliente.Notas;
 
+        if (empleado is not null) Bloque(Explicacion($"Cambio autorizado por {empleado}. Quedará registrado en Logs."));
         Campo("Nombre *", _nombre);
         Campo("Cédula / identificación", _identificacion);
         Campo("Teléfono", _telefono);
@@ -97,11 +124,22 @@ internal sealed class ClienteDialog : DialogoBase
             _nombre.Focus();
             return false;
         }
-        Cliente.Nombre = _nombre.Text.Trim();
-        Cliente.Identificacion = _identificacion.Text;
-        Cliente.Telefono = _telefono.Text;
-        Cliente.Correo = _correo.Text;
-        Cliente.Notas = _notas.Text;
+        var c = new Cliente
+        {
+            Id = Cliente.Id,
+            Nombre = _nombre.Text.Trim(),
+            Identificacion = _identificacion.Text,
+            Telefono = _telefono.Text,
+            Correo = _correo.Text,
+            Notas = _notas.Text
+        };
+        if (!IntentarGuardar(() => _guardar(c))) return false;
+        Cliente.Id = c.Id;
+        Cliente.Nombre = c.Nombre;
+        Cliente.Identificacion = c.Identificacion;
+        Cliente.Telefono = c.Telefono;
+        Cliente.Correo = c.Correo;
+        Cliente.Notas = c.Notas;
         return true;
     }
 }
@@ -109,32 +147,47 @@ internal sealed class ClienteDialog : DialogoBase
 internal sealed class ProductoDialog : DialogoBase
 {
     private readonly TextBox _nombre = Ui.Texto(300);
-    private readonly NumericUpDown _precio = Ui.Monto();
+    private readonly CampoMonto _precio = new();
     private readonly Label _desglose = Ui.Etiqueta("");
+    private readonly CampoEntero _inventario = new(0, 1_000_000, 0, anchoTexto: 80);
     private readonly CheckBox _activo = new() { Text = "Disponible para nuevas órdenes", AutoSize = true, Font = Ui.Fuente };
+    private readonly Producto _producto;
+    private readonly Action<Producto> _guardar;
 
-    public Producto Producto { get; }
-
-    public ProductoDialog(Producto producto) : base(producto.Id == 0 ? "Nuevo producto" : "Editar producto")
+    public ProductoDialog(Producto producto, Action<Producto> guardar, string empleado)
+        : base(producto.Id == 0 ? "Nuevo producto" : "Editar producto", "Guardar")
     {
-        Producto = producto;
+        _producto = producto;
+        _guardar = guardar;
         _nombre.Text = producto.Nombre;
-        _precio.Value = Math.Min(producto.PrecioConIva, _precio.Maximum);
+        _precio.Centimos = producto.PrecioConIvaCentimos;
+        _inventario.Valor = producto.Inventario;
         _activo.Checked = producto.Activo;
         _desglose.ForeColor = Color.DimGray;
 
+        Bloque(Explicacion($"Cambio autorizado por {empleado}. Quedará registrado en Logs."));
         Campo("Nombre *", _nombre);
         Campo("Precio con IVA incluido (₡)", _precio);
         Campo("", _desglose);
+        if (producto.TieneVariantes)
+        {
+            _inventario.Enabled = false;
+            Campo("Inventario", Ui.Fila(_inventario,
+                Explicacion("Se calcula sumando sus características. Cámbielo con el botón \"Inventario / características\".", 300)));
+        }
+        else
+        {
+            Campo("Inventario (cantidad)", _inventario);
+        }
         Campo("", _activo);
 
-        _precio.ValueChanged += (_, _) => ActualizarDesglose();
+        _precio.TextChanged += (_, _) => ActualizarDesglose();
         ActualizarDesglose();
     }
 
     private void ActualizarDesglose()
     {
-        var r = CalculadoraIva.DesglosarTotal(Dinero.ACentimos(_precio.Value));
+        var r = CalculadoraIva.DesglosarTotal(_precio.Centimos);
         _desglose.Text = $"Base: {Ui.Fmt(r.BaseCentimos)}   +   IVA 13 %: {Ui.Fmt(r.IvaCentimos)}";
     }
 
@@ -146,14 +199,100 @@ internal sealed class ProductoDialog : DialogoBase
             _nombre.Focus();
             return false;
         }
-        Producto.Nombre = _nombre.Text.Trim();
-        Producto.PrecioConIva = _precio.Value;
-        Producto.Activo = _activo.Checked;
-        return true;
+        var p = new Producto
+        {
+            Id = _producto.Id,
+            Nombre = _nombre.Text.Trim(),
+            PrecioConIvaCentimos = _precio.Centimos,
+            Inventario = _inventario.Valor,
+            Activo = _activo.Checked
+        };
+        return IntentarGuardar(() => _guardar(p));
     }
 }
 
-/// <summary>Pide un texto (por ejemplo, el motivo de una anulación).</summary>
+/// <summary>Características de inventario de un producto (ej. colores y cantidad por color).</summary>
+internal sealed class InventarioDialog : DialogoBase
+{
+    private readonly DataGridView _grid = Ui.Grid();
+    private readonly Label _total = Ui.Etiqueta("", Ui.FuenteNegrita);
+    private readonly Action<List<VarianteInventario>> _guardar;
+
+    public InventarioDialog(Producto producto, List<VarianteInventario> actuales, Action<List<VarianteInventario>> guardar, string empleado)
+        : base($"Inventario — {producto.Nombre}", "Guardar")
+    {
+        _guardar = guardar;
+
+        _grid.Dock = DockStyle.None;
+        _grid.Size = new Size(460, 240);
+        _grid.ReadOnly = false;
+        _grid.AllowUserToAddRows = true;
+        _grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
+        _grid.EditMode = DataGridViewEditMode.EditOnEnter;
+        Ui.Columna(_grid, "Característica (ej. color)", 260);
+        Ui.Columna(_grid, "Cantidad", 100, derecha: true);
+        foreach (var v in actuales) _grid.Rows.Add(v.Descripcion, v.Cantidad);
+        _grid.CellValueChanged += (_, _) => ActualizarTotal();
+        _grid.RowsRemoved += (_, _) => ActualizarTotal();
+        _grid.EditingControlShowing += (_, e) =>
+        {
+            if (e.Control is not TextBox t) return;
+            t.KeyPress -= SoloDigitos;
+            if (_grid.CurrentCell?.ColumnIndex == 1) t.KeyPress += SoloDigitos;
+        };
+
+        Bloque(Explicacion(
+            "Escriba cada característica y su cantidad en una fila nueva (por ejemplo: Blanco 20, Rojo 15). " +
+            "El inventario del producto será la suma. Si el producto no tiene características, deje la lista vacía " +
+            "y escriba la cantidad en \"Editar\"."));
+        Bloque(Explicacion($"Cambio autorizado por {empleado}. Quedará registrado en Logs."));
+        Bloque(_grid);
+        Bloque(Ui.Fila(
+            Ui.Boton("Quitar fila seleccionada", (_, _) => QuitarFila()),
+            _total));
+        ActualizarTotal();
+    }
+
+    private static void SoloDigitos(object? s, KeyPressEventArgs e)
+    {
+        if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar)) e.Handled = true;
+    }
+
+    private void QuitarFila()
+    {
+        var fila = _grid.CurrentRow;
+        if (fila is null || fila.IsNewRow) return;
+        _grid.Rows.Remove(fila);
+    }
+
+    private List<(string Descripcion, string Cantidad)> Filas() =>
+        _grid.Rows.Cast<DataGridViewRow>()
+            .Where(r => !r.IsNewRow)
+            .Select(r => ((r.Cells[0].Value?.ToString() ?? "").Trim(), (r.Cells[1].Value?.ToString() ?? "").Trim()))
+            .Where(f => f.Item1.Length > 0 || f.Item2.Length > 0)
+            .ToList();
+
+    private void ActualizarTotal()
+    {
+        int total = Filas().Sum(f => int.TryParse(f.Cantidad, out int n) ? n : 0);
+        _total.Text = $"     Inventario total: {total}";
+    }
+
+    protected override bool Validar()
+    {
+        _grid.EndEdit();
+        var variantes = new List<VarianteInventario>();
+        foreach (var (desc, cant) in Filas())
+        {
+            if (desc.Length == 0) { Ui.Info($"Falta la descripción de la fila con cantidad {cant}."); return false; }
+            if (!int.TryParse(cant, out int n) || n < 0) { Ui.Info($"La cantidad de \"{desc}\" no es válida."); return false; }
+            variantes.Add(new VarianteInventario { Descripcion = desc, Cantidad = n });
+        }
+        return IntentarGuardar(() => _guardar(variantes));
+    }
+}
+
+/// <summary>Pide un texto (por ejemplo, el motivo de una anulación o las notas).</summary>
 internal sealed class TextoDialog : DialogoBase
 {
     private readonly TextBox _texto = Ui.Texto(380, multilinea: true);
@@ -161,9 +300,11 @@ internal sealed class TextoDialog : DialogoBase
 
     public string Valor => _texto.Text.Trim();
 
-    public TextoDialog(string titulo, string etiqueta, bool obligatorio = true) : base(titulo)
+    public TextoDialog(string titulo, string etiqueta, bool obligatorio = true, string? valorInicial = null) : base(titulo)
     {
         _obligatorio = obligatorio;
+        _texto.Text = valorInicial ?? "";
+        _texto.Height = 80;
         Campo(etiqueta, _texto);
     }
 
@@ -188,51 +329,5 @@ internal sealed class FechaDialog : DialogoBase
     {
         _fecha.Value = DateTime.Today;
         Campo(etiqueta, _fecha);
-    }
-}
-
-/// <summary>Detalle de una orden (solo lectura).</summary>
-internal sealed class OrdenDetalleForm : Form
-{
-    public OrdenDetalleForm(Orden o)
-    {
-        Text = $"Orden N° {o.Numero}";
-        Font = Ui.Fuente;
-        StartPosition = FormStartPosition.CenterParent;
-        Size = new Size(820, 520);
-        MinimizeBox = false;
-        ShowInTaskbar = false;
-
-        var info = new TableLayoutPanel { AutoSize = true, ColumnCount = 4 };
-        void Dato(string etiqueta, string valor, int col, int fila)
-        {
-            info.Controls.Add(Ui.Etiqueta(etiqueta, Ui.FuenteNegrita), col, fila);
-            info.Controls.Add(Ui.Etiqueta(valor), col + 1, fila);
-        }
-        Dato("Cliente:", o.ClienteNombre, 0, 0);
-        Dato("Estado:", o.Estado.ToString(), 2, 0);
-        Dato("Fecha de la orden:", Ui.Fmt(o.Fecha), 0, 1);
-        Dato("Inicio / devolución:", $"{Ui.Fmt(o.FechaInicio)} – {(o.FechaFin is null ? "sin definir" : Ui.Fmt(o.FechaFin))}", 2, 1);
-        if (!string.IsNullOrWhiteSpace(o.Notas)) Dato("Notas:", o.Notas!, 0, 2);
-        if (o.Estado == EstadoOrden.Anulada) Dato("Motivo anulación:", o.MotivoAnulacion ?? "", 2, 2);
-
-        var grid = Ui.Grid();
-        Ui.Columna(grid, "Producto", 200);
-        Ui.Columna(grid, "Precio unit.", 110, derecha: true);
-        Ui.Columna(grid, "Cant.", 50, derecha: true);
-        Ui.Columna(grid, "Días", 50, derecha: true);
-        Ui.Columna(grid, "Total", 110, derecha: true);
-        Ui.Columna(grid, "Base", 110, derecha: true);
-        Ui.Columna(grid, "IVA", 100, derecha: true);
-        foreach (var l in o.Lineas)
-            grid.Rows.Add(l.ProductoNombre, Ui.Fmt(l.PrecioUnitarioCentimos), l.Cantidad, l.Dias,
-                Ui.Fmt(l.TotalCentimos), Ui.Fmt(l.BaseCentimos), Ui.Fmt(l.IvaCentimos));
-
-        var totales = Ui.Fila(
-            Ui.Etiqueta($"Base: {Ui.Fmt(o.BaseCentimos)}"),
-            Ui.Etiqueta($"   IVA: {Ui.Fmt(o.IvaCentimos)}"),
-            Ui.Etiqueta($"   TOTAL: {Ui.Fmt(o.TotalCentimos)}", Ui.FuenteTotal));
-
-        Controls.Add(Ui.Pila(info, grid, totales));
     }
 }

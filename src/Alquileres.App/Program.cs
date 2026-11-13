@@ -24,7 +24,7 @@ internal static class Program
         catch (Exception ex)
         {
             MessageBox.Show("No se pudo abrir la base de datos:\n\n" + ex.Message,
-                "Sistema de Alquileres", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Ui.Titulo, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 

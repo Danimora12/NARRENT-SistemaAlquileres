@@ -8,11 +8,11 @@
     <Nullable>enable</Nullable>
     <!-- Permite compilar también desde Linux/macOS; en Windows no afecta. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <AssemblyName>SistemaAlquileres</AssemblyName>
+    <AssemblyName>NARRENT</AssemblyName>
     <RootNamespace>Alquileres.App</RootNamespace>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <Product>Sistema de Alquileres</Product>
-    <Version>1.0.0</Version>
+    <Product>NARRENT</Product>
+    <Version>2.0.0</Version>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 

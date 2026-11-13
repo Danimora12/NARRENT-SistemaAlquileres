@@ -5,7 +5,7 @@ namespace Alquileres.App;
 /// <summary>Ayudantes para construir pantallas con un estilo uniforme.</summary>
 internal static class Ui
 {
-    public const string Titulo = "Sistema de Alquileres";
+    public const string Titulo = "NARRENT";
     public static readonly Font Fuente = new("Segoe UI", 10f);
     public static readonly Font FuenteNegrita = new("Segoe UI", 10f, FontStyle.Bold);
     public static readonly Font FuenteTotal = new("Segoe UI", 16f, FontStyle.Bold);
@@ -101,6 +101,24 @@ internal static class Ui
         Multiline = multilinea,
         Height = multilinea ? 60 : 27
     };
+
+    /// <summary>Recuadro con título y filas apiladas (se ajusta a su contenido).</summary>
+    public static GroupBox Grupo(string titulo, params Control[] filas)
+    {
+        var g = new GroupBox { Text = titulo, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Font = FuenteNegrita, Padding = new Padding(8) };
+        var pila = new FlowLayoutPanel
+        {
+            Location = new Point(8, 24),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Font = Fuente
+        };
+        pila.Controls.AddRange(filas);
+        g.Controls.Add(pila);
+        return g;
+    }
 
     public static FlowLayoutPanel Fila(params Control[] controles)
     {
