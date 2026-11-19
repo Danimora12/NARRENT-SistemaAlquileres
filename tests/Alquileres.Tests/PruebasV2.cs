@@ -13,6 +13,7 @@ public sealed class PruebasV2 : IDisposable
     private readonly OrdenRepositorio _ordenes;
     private readonly ReporteServicio _reporte;
     private readonly LogRepositorio _logs;
+    private int _siguienteId;
 
     public PruebasV2()
     {
@@ -33,7 +34,7 @@ public sealed class PruebasV2 : IDisposable
 
     private Cliente NuevoCliente(string nombre = "Ana Solís")
     {
-        var c = new Cliente { Nombre = nombre };
+        var c = new Cliente { Nombre = nombre, TipoIdentificacion = TipoIdentificacion.Pasaporte, Identificacion = "P" + (++_siguienteId).ToString("D6") };
         _clientes.Guardar(c);
         return c;
     }
@@ -265,37 +266,13 @@ public sealed class PruebasV2 : IDisposable
     // ───────────── Inventario ─────────────
 
     [Fact]
-    public void Inventario_simple_y_con_caracteristicas()
+    public void Inventario_simple()
     {
         var p = _productos.Listar().First();
         p.Inventario = 12;
         _productos.Guardar(p, "María");
         Assert.Equal(12, _productos.Obtener(p.Id)!.Inventario);
-
-        _productos.GuardarVariantes(p.Id, new[]
-        {
-            new VarianteInventario { Descripcion = "Blanco", Cantidad = 20 },
-            new VarianteInventario { Descripcion = "Rojo", Cantidad = 15 }
-        }, "José");
-        var leido = _productos.Obtener(p.Id)!;
-        Assert.Equal(35, leido.Inventario);
-        Assert.Equal(2, leido.CantidadVariantes);
-
-        // Con características, el total no se sobrescribe desde la edición del producto
-        leido.Inventario = 1;
-        leido.PrecioConIva = 5_000m;
-        _productos.Guardar(leido, "María");
-        Assert.Equal(35, _productos.Obtener(p.Id)!.Inventario);
-
-        Assert.Throws<ReglaNegocioException>(() => _productos.GuardarVariantes(p.Id, new[]
-        {
-            new VarianteInventario { Descripcion = "Azul", Cantidad = 1 },
-            new VarianteInventario { Descripcion = "azul", Cantidad = 2 }
-        }));
-
-        var logs = Logs();
-        Assert.Contains(logs, l => l.Accion == "Producto editado" && l.Empleado == "María" && l.Detalle.Contains("Inventario: 0 → 12"));
-        Assert.Contains(logs, l => l.Accion == "Inventario actualizado" && l.Empleado == "José" && l.Detalle.Contains("Blanco 20, Rojo 15 (total 35)"));
+        Assert.Contains(Logs(), l => l.Accion == "Producto editado" && l.Empleado == "María" && l.Detalle.Contains("Inventario: 0 → 12"));
     }
 
     // ───────────── Clientes ─────────────
@@ -314,41 +291,6 @@ public sealed class PruebasV2 : IDisposable
         Assert.Contains(logs, l => l.Accion == "Cliente eliminado" && l.Empleado == "José" && l.Referencia == "Cliente Temporal");
     }
 
-    // ───────────── Códigos de autorización ─────────────
-
-    [Fact]
-    public void Codigos_de_autorizacion()
-    {
-        var seg = new SeguridadServicio(_db);
-        Assert.False(seg.Configurado);
-        Assert.Throws<ReglaNegocioException>(() => seg.Validar("1111", "9999"));
-
-        // Los 3 códigos deben ser distintos y de al menos 4 caracteres
-        Assert.Throws<ReglaNegocioException>(() => seg.Configurar(new[] { ("María", "1111"), ("José", "1111") }, "9999"));
-        Assert.Throws<ReglaNegocioException>(() => seg.Configurar(new[] { ("María", "1111"), ("José", "2222") }, "123"));
-
-        seg.Configurar(new[] { ("María", "1111"), ("José", "2222") }, "9999");
-        Assert.True(seg.Configurado);
-        Assert.Equal("María", seg.Validar("1111", "9999"));
-        Assert.Equal("José", seg.Validar(" 2222 ", "9999"));
-        Assert.Throws<ReglaNegocioException>(() => seg.Validar("1111", "0000"));
-        Assert.Throws<ReglaNegocioException>(() => seg.Validar("9999", "9999"));
-        Assert.Throws<ReglaNegocioException>(() => seg.Validar("3333", "9999"));
-
-        // Los códigos no quedan en texto plano
-        using (var cn = _db.Abrir())
-        {
-            long enClaro = BaseDatos_Escalar(cn, "SELECT COUNT(*) FROM config WHERE valor IN ('1111','2222','9999');");
-            Assert.Equal(0, enClaro);
-        }
-
-        // Cambiarlos exige el código de confirmación actual
-        Assert.Throws<ReglaNegocioException>(() => seg.Configurar(new[] { ("María", "5555"), ("José", "6666") }, "7777", "0000"));
-        seg.Configurar(new[] { ("María", "5555"), ("José", "6666") }, "7777", "9999");
-        Assert.Equal("José", seg.Validar("6666", "7777"));
-        Assert.Throws<ReglaNegocioException>(() => seg.Validar("1111", "9999"));
-    }
-
     private static long BaseDatos_Escalar(SqliteConnection cn, string sql)
     {
         using var cmd = cn.CreateCommand();
@@ -365,28 +307,23 @@ public sealed class PruebasV2 : IDisposable
         var p = Producto(0, 113_000m);
         CrearOrden(new DateTime(2026, 12, 5), null, Linea(p));            // neto 100.000
 
-        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 12, 1), Categoria = "Alquiler del local", Descripcion = "Local diciembre",
+        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 12, 1), Categoria = "Alquiler del local", Detalle = "Local diciembre",
             MontoCentimos = Dinero.ACentimos(30_000m) });
-        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 12, 10), Categoria = "Limpieza y lavandería", Descripcion = "Lavado manteles",
-            MontoCentimos = Dinero.ACentimos(11_300m), IvaCentimos = Dinero.ACentimos(1_300m) });  // cuenta 10.000
-        gastos.Guardar(new Gasto { Fecha = new DateTime(2027, 1, 2), Categoria = "Otros", Descripcion = "Otro año",
+        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 12, 10), Categoria = "Limpieza y lavandería", Detalle = "Lavado manteles",
+            MontoCentimos = Dinero.ACentimos(11_300m) });
+        gastos.Guardar(new Gasto { Fecha = new DateTime(2027, 1, 2), Categoria = "Otros", Detalle = "Otro año",
             MontoCentimos = Dinero.ACentimos(5_000m) });
 
         var dic = _reporte.ResumenMes(2026, 12);
-        Assert.Equal(Dinero.ACentimos(40_000m), dic.GastosCentimos);
-        Assert.Equal(Dinero.ACentimos(60_000m), dic.UtilidadCentimos);
+        Assert.Equal(Dinero.ACentimos(41_300m), dic.GastosCentimos);     // monto completo, sin descontar IVA
+        Assert.Equal(Dinero.ACentimos(58_700m), dic.UtilidadCentimos);
         Assert.Equal(Dinero.ACentimos(13_000m), dic.IvaCentimos);
-        Assert.Equal(Dinero.ACentimos(1_300m), dic.IvaGastosCentimos);
-        Assert.Equal(Dinero.ACentimos(11_700m), dic.IvaNetoCentimos);
 
         // Un mes con gastos y sin ventas da utilidad negativa
         var nov = _reporte.ResumenMes(2026, 11);
         Assert.Equal(0, nov.GastosCentimos);
-        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 11, 3), Categoria = "Otros", Descripcion = "x", MontoCentimos = 100_00 });
+        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 11, 3), Categoria = "Otros", Detalle = "x", MontoCentimos = 100_00 });
         Assert.Equal(-100_00, _reporte.ResumenMes(2026, 11).UtilidadCentimos);
-        gastos.Guardar(new Gasto { Fecha = new DateTime(2026, 11, 4), Categoria = "Otros", Descripcion = "con IVA",
-            MontoCentimos = 1_130_00, IvaCentimos = 130_00 });
-        Assert.Equal(-130_00, _reporte.ResumenMes(2026, 11).IvaNetoCentimos);   // saldo a favor
 
         Assert.Equal(2, gastos.Listar(new DateTime(2026, 12, 1), new DateTime(2026, 12, 31)).Count);
         Assert.Single(gastos.Listar(new DateTime(2026, 12, 1), new DateTime(2026, 12, 31), categoria: "Alquiler del local"));
@@ -397,21 +334,20 @@ public sealed class PruebasV2 : IDisposable
         string ruta = Path.Combine(_carpeta, "dic.xlsx");
         _reporte.ExportarMesExcel(2026, 12, ruta);
         using var wb = new ClosedXML.Excel.XLWorkbook(ruta);
-        Assert.Equal(40_000m, wb.Worksheet("Resumen").Cell(7, 2).GetValue<decimal>());
-        Assert.Equal(60_000m, wb.Worksheet("Resumen").Cell(8, 2).GetValue<decimal>());
-        Assert.Equal(11_700m, wb.Worksheet("Resumen").Cell(10, 2).GetValue<decimal>());
-        Assert.Equal(40_000m, wb.Worksheet("Gastos").Cell(4, 8).GetValue<decimal>());
+        Assert.Equal(41_300m, wb.Worksheet("Resumen").Cell(7, 2).GetValue<decimal>());
+        Assert.Equal(58_700m, wb.Worksheet("Resumen").Cell(8, 2).GetValue<decimal>());
+        Assert.True(wb.Worksheet("Resumen").Cell(9, 1).IsEmpty());             // ya no hay filas de IVA de gastos
+        Assert.Equal(41_300m, wb.Worksheet("Gastos").Cell(4, 5).GetValue<decimal>());
     }
 
     [Fact]
     public void Editar_y_eliminar_gastos_exigen_empleado_y_quedan_en_logs()
     {
         var gastos = new GastoRepositorio(_db);
-        var g = new Gasto { Categoria = "Otros", Descripcion = "Gasolina", MontoCentimos = 10_000_00 };
+        var g = new Gasto { Categoria = "Otros", Detalle = "Gasolina", MontoCentimos = 10_000_00 };
         gastos.Guardar(g);
 
-        Assert.Throws<ReglaNegocioException>(() => gastos.Guardar(new Gasto { Categoria = "Otros", Descripcion = "x", MontoCentimos = 0 }));
-        Assert.Throws<ReglaNegocioException>(() => gastos.Guardar(new Gasto { Categoria = "Otros", Descripcion = "x", MontoCentimos = 100, IvaCentimos = 200 }));
+        Assert.Throws<ReglaNegocioException>(() => gastos.Guardar(new Gasto { Categoria = "Otros", Detalle = "x", MontoCentimos = 0 }));
 
         g.MontoCentimos = 12_000_00;
         Assert.Throws<ReglaNegocioException>(() => gastos.Guardar(g));       // sin empleado
@@ -487,7 +423,7 @@ public sealed class PruebasV2 : IDisposable
         Assert.Contains(new LogRepositorio(db).Listar(DateTime.Today.AddDays(-1), DateTime.Today.AddDays(1)),
             l => l.Accion == "Actualización a NARRENT v2" && l.Detalle.Contains("3 órdenes"));
 
-        new GastoRepositorio(db).Guardar(new Gasto { Categoria = "Otros", Descripcion = "Prueba", MontoCentimos = 100 });
+        new GastoRepositorio(db).Guardar(new Gasto { Categoria = "Otros", Detalle = "Prueba", MontoCentimos = 100 });
 
         // Volver a inicializar no repite la migración
         db.Inicializar();

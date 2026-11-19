@@ -6,13 +6,17 @@ namespace Alquileres.Core;
 /// <summary>
 /// Registro de auditoría (pestaña Logs). Solo se agregan entradas: el programa
 /// no tiene ninguna función para editarlas o borrarlas.
+///
+/// Toda entrada queda a nombre del usuario que tiene la sesión iniciada, salvo que
+/// se indique otro nombre explícitamente.
 /// </summary>
 public class LogRepositorio(BaseDatos db)
 {
     /// <summary>Registra dentro de una transacción existente (así el log y el cambio se guardan juntos).</summary>
-    internal static void Registrar(SqliteConnection cn, SqliteTransaction? tx, string? empleado,
+    internal static void Registrar(BaseDatos? db, SqliteConnection cn, SqliteTransaction? tx, string? empleado,
         string accion, string referencia, string detalle)
     {
+        if (string.IsNullOrWhiteSpace(empleado)) empleado = db?.UsuarioActual?.Nombre;
         using var cmd = cn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
@@ -30,7 +34,7 @@ public class LogRepositorio(BaseDatos db)
     public void Registrar(string? empleado, string accion, string referencia, string detalle)
     {
         using var cn = db.Abrir();
-        Registrar(cn, null, empleado, accion, referencia, detalle);
+        Registrar(db, cn, null, empleado, accion, referencia, detalle);
     }
 
     public List<EntradaLog> Listar(DateTime desde, DateTime hasta, string? texto = null)

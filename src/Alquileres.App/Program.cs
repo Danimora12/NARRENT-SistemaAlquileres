@@ -1,4 +1,5 @@
 using Alquileres.Core;
+using Alquileres.App.Pantallas;
 
 namespace Alquileres.App;
 
@@ -27,6 +28,9 @@ internal static class Program
                 Ui.Titulo, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
+
+        // Login (o configuración inicial si todavía no hay usuarios). "Salir" cierra el programa.
+        if (!Sesion.Iniciar(db)) return;
 
         Application.Run(new FormPrincipal(db));
     }

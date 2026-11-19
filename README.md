@@ -18,15 +18,18 @@ SistemaAlquileres.sln
 | Archivo | Qué contiene |
 |---|---|
 | `Core/CalculadoraIva.cs` | IVA incluido (base = total / 1,13; IVA = total − base) y descuentos por línea |
-| `Core/BaseDatos.cs` | Crea el archivo SQLite y actualiza bases viejas paso a paso (v1 → v2) |
+| `Core/BaseDatos.cs` | Crea el archivo SQLite y actualiza bases viejas paso a paso (v1 → v5); guarda el usuario de la sesión |
 | `Core/Repositorios.cs` | Productos e inventario, clientes, órdenes, pagos y configuración |
 | `Core/Auditoria.cs` | Logs (registro de cambios) y número de orden año-mes-consecutivo |
-| `Core/SeguridadServicio.cs` | Códigos de empleado y de confirmación (guardados con hash, no en texto) |
+| `Core/Identificacion.cs` | Tipos de identificación de Costa Rica: formato, validación y presentación con guiones |
+| `Core/Usuarios.cs` | Usuarios, roles, inicio de sesión, contraseñas temporales y migración desde los códigos de empleado |
+| `Core/SeguridadServicio.cs` | Código de confirmación (guardado con hash, no en texto) |
+| `Core/Claves.cs` | Hash PBKDF2 con sal para contraseñas y códigos |
 | `Core/GastoRepositorio.cs` | Gastos de la empresa |
 | `Core/ReporteServicio.cs` | Flujo de caja mensual y anual (con gastos y utilidad) + exportación a Excel |
 | `Core/RespaldoServicio.cs` | Respaldos automáticos (`VACUUM INTO`) y restauración |
 | `App/Controles.cs` | Campo de monto sin decimales y campo numérico con botones − / + |
-| `App/Pantallas/*` | Nueva orden, Órdenes, Productos, Clientes, Gastos, Flujo de caja, Respaldos, Logs y sus ventanas |
+| `App/Pantallas/*` | Login, Nueva orden, Órdenes, Productos, Clientes, Gastos, Flujo de caja, Respaldos, Logs, Usuarios y sus ventanas |
 
 ## Cómo abrirlo y ejecutarlo
 
@@ -54,7 +57,7 @@ Para actualizar al cliente basta con reemplazar el `.exe`: los datos están en o
 1. Cerrar el programa viejo (al cerrar se crea un respaldo automático).
 2. Copiar `NARRENT.exe` junto al viejo, **cambiar el acceso directo del escritorio** para que apunte a `NARRENT.exe` y borrar `SistemaAlquileres.exe`.
 3. Abrir NARRENT: la base se actualiza sola y las órdenes existentes se renumeran con el formato nuevo (queda constancia en *Logs*). Las órdenes de la v1 aparecen *sin pago*: si ya estaban pagadas, registrar el pago desde el detalle.
-4. Ir a *Logs → Códigos de autorización…* y definir los nombres y códigos de los 2 empleados y el código de confirmación **con el cliente presente**.
+4. Al abrir por primera vez aparece la *Configuración inicial*: crear el primer administrador y el código de confirmación **con el cliente presente**. Los demás usuarios se crean en la pestaña *Usuarios*.
 5. Completar el inventario en *Productos*.
 
 ## Dónde quedan los datos
@@ -77,27 +80,35 @@ Cada vez que se cierra el programa se crea un respaldo. **Configurá la carpeta 
 - **Descuento de 1 % a 15 %**, a toda la orden o a un solo producto, al confirmar la orden. Se redondea al colón y el IVA se calcula sobre el monto ya descontado. Después de confirmada, el descuento no se cambia.
 - **Pagos:** al confirmar se registra el pago adelantado (SINPE Móvil, transferencia, efectivo o tarjeta). Los abonos y la cancelación del saldo se registran en el detalle de la orden. No se puede pagar más que el saldo ni pagar órdenes anuladas.
 - **Anular ≠ eliminar.** *Anular* deja la orden visible (tachada) con su motivo. *Eliminar* es para órdenes fantasma o de prueba: la manda a *Órdenes eliminadas*, de donde se puede restaurar con su mismo número. En ambos casos deja de contar en el flujo de caja.
-- **Acciones que piden código de empleado + código de confirmación:** eliminar y restaurar órdenes, eliminar un pago, crear/editar/activar productos, editar inventario, editar y eliminar clientes, editar y eliminar gastos. El empleado que autorizó queda en *Logs*. Tras 3 intentos fallidos la acción se cancela y el intento queda registrado.
-- **Logs:** cada cambio (órdenes, pagos, notas, productos, inventario, clientes, códigos) queda registrado con fecha, acción, detalle *antes → después* y, si aplica, el empleado. El programa no permite editar ni borrar logs.
-- **Inventario:** cada producto tiene una cantidad. Si se le agregan características (ej. colores con su cantidad), el inventario es la suma de ellas. Es el inventario que se tiene, no la disponibilidad por fecha.
-- **Gastos:** fecha, categoría, descripción, proveedor, método, monto pagado e IVA de la factura (opcional). Registrar no pide código; editar y eliminar sí. El IVA de la factura no cuenta como gasto en la utilidad, porque se recupera como crédito fiscal.
-- **Utilidad = ingresos netos (sin IVA) − gastos sin IVA**, por mes. Es antes del impuesto sobre la renta. Los ingresos van por fecha de la orden y los gastos por su propia fecha.
-- **IVA neto a pagar = Total IVA − IVA de las facturas de gastos**, por mes. Si da negativo es saldo a favor. Es una estimación para el formulario 150: solo es crédito fiscal el IVA de facturas electrónicas a nombre del negocio y relacionadas con su actividad; el contador tiene la última palabra.
+- **Inicio de sesión:** cada persona entra con su usuario y contraseña. La sesión no se cierra sola; el botón *Bloquear / Cambiar usuario* (arriba a la derecha) la cierra y pide ingresar de nuevo. No hay bloqueo por intentos fallidos, pero cada intento fallido queda en *Logs*.
+- **Usuarios:** nadie se registra solo; los crea un administrador con una contraseña temporal que la persona cambia al entrar por primera vez. Si alguien olvida su contraseña, un administrador se la restablece (*Usuarios → Restablecer contraseña*). Los usuarios no se borran, se desactivan, para conservar el historial. Siempre debe quedar al menos un administrador activo.
+- **Roles:** *Administrador* maneja todo el sistema, incluidos usuarios y código de confirmación. *Empleado* usa el sistema pero no administra usuarios ni el código.
+- **Acciones que piden el código de confirmación:** eliminar y restaurar órdenes, eliminar un pago, crear/editar/activar productos, editar inventario, editar y eliminar clientes, editar y eliminar gastos, y crear, editar o restablecer usuarios. Es la aprobación y el "¿está seguro?" del cambio; quien lo hace es el usuario de la sesión. Tras 3 intentos fallidos la acción se cancela y el intento queda registrado.
+- **Logs:** cada cambio (órdenes, pagos, notas, productos, inventario, clientes, gastos, usuarios, inicios de sesión) queda registrado con fecha, acción, detalle *antes → después* y el usuario que tenía la sesión iniciada. El programa no permite editar ni borrar logs.
+- **Clientes:** el tipo de identificación (cédula física, cédula jurídica, DIMEX, NITE o pasaporte) y el número son obligatorios. El número se valida con el formato del tipo, se guarda sin guiones y no puede repetirse (aunque se escriba con guiones o con otro tipo). Los clientes registrados antes de esta regla aparecen como *Sin tipo* y deben completarla la próxima vez que se editen. Cédula jurídica acepta las que empiezan con 2, 3 o 4 (Gobierno, personas jurídicas e instituciones autónomas).
+- **Código de producto:** las 3 primeras letras del nombre, sin tildes, + un consecutivo de 3 dígitos por prefijo (*Manteles* → `MAN001`, *Mantas* → `MAN002`). Se asigna solo al crear el producto y no cambia si se cambia el nombre. Solo un administrador puede escribirlo a mano (3 a 15 letras, números o guion). No se repite.
+- **Inventario:** cada producto tiene una cantidad. Es el inventario que se tiene, no la disponibilidad por fecha.
+- **Gastos:** fecha, categoría, detalle, método y monto pagado. La categoría la escribe el usuario (se sugieren las ya usadas; si se escribe una existente con otras mayúsculas o espacios, se usa la existente). Registrar no pide código; editar y eliminar sí.
+- **Utilidad = ingresos netos (sin IVA) − gastos (monto pagado)**, por mes. Es antes del impuesto sobre la renta. Los ingresos van por fecha de la orden y los gastos por su propia fecha.
 - **El mes del flujo de caja lo define la *fecha de la orden*.** No cuentan las órdenes anuladas ni las eliminadas.
 - **Flujo de caja:** *Ingresos brutos* = cobrado con IVA (ya con descuentos); *Ingresos netos* = sin IVA; *Total IVA 13 %* = IVA cobrado (débito fiscal). El IVA a pagar en el formulario 150 de TRIBU-CR es ese monto menos el IVA de las compras del negocio (crédito fiscal), que este sistema no registra.
 - **Este sistema no emite factura electrónica.** Si el cliente está inscrito en Hacienda, debe seguir facturando con TicoFactura o con un facturador autorizado. Este programa sirve como control interno y para conciliar.
 
-## Si se olvidan los códigos
+## Si se olvidan contraseñas o el código
 
-Para cambiar los códigos hace falta el código de confirmación actual. Si se perdió, cerrar el programa, abrir `datos.db` con [DB Browser for SQLite](https://sqlitebrowser.org/) y ejecutar:
+- **Una persona olvidó su contraseña:** otro administrador se la restablece en *Usuarios*.
+- **Todos los administradores olvidaron su contraseña** (solo el técnico): hacer un respaldo, cerrar el programa, abrir `datos.db` con [DB Browser for SQLite](https://sqlitebrowser.org/) y ejecutar `DELETE FROM usuarios;`. Al abrir NARRENT aparece la configuración inicial para crear un administrador nuevo, que vuelve a crear a los demás. Los Logs conservan los nombres anteriores.
+- **Se perdió el código de confirmación** (solo el técnico): con el mismo procedimiento ejecutar `DELETE FROM config WHERE clave = 'seg_confirmacion';`. La próxima acción protegida le pedirá a un administrador definir uno nuevo.
 
-```sql
-DELETE FROM config WHERE clave LIKE 'seg_%';
-```
+### Actualización a v5 (clientes, productos y gastos)
 
-Al abrir NARRENT, la próxima acción protegida pedirá configurarlos de nuevo. Hacer un respaldo antes.
+Al abrir esta versión: cada producto recibe su código; se quitan las características de inventario (el inventario total de cada producto se conserva); en los gastos, *Descripción* pasa a llamarse *Detalle*, el proveedor que tuviera se agrega al final del detalle y se elimina el IVA de la factura, así que esos gastos pasan a restar su monto completo en la utilidad. Todo queda resumido en *Logs*.
 
-**Limitación honesta:** los códigos se guardan con hash, pero el archivo de datos no está cifrado. Son control y trazabilidad entre empleados, no protección contra alguien con acceso técnico a la computadora.
+### Paso de los códigos de empleado (v3) al inicio de sesión (v4)
+
+Al abrir la versión con login, los 2 empleados que tenían código pasan a ser **usuarios administradores**: usuario = primer nombre + último apellido sin tildes (ej. *María José Pérez* → `maria.perez`), contraseña inicial = **su código de empleado de siempre**. El sistema les pide cambiarla al entrar. El código de confirmación no cambia. Los usuarios creados quedan anotados en *Logs*.
+
+**Limitación honesta:** contraseñas y código se guardan con hash, pero el archivo de datos no está cifrado. Son control y trazabilidad entre usuarios, no protección contra alguien con acceso técnico a la computadora. Restaurar un respaldo viejo también restaura los usuarios y contraseñas que había en esa fecha.
 
 ## Ideas para una versión 3
 

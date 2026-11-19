@@ -39,23 +39,23 @@ public class ReporteServicio(BaseDatos db)
             }
         }
 
-        // Gastos del mes sin el IVA de las facturas (ese IVA es crédito fiscal, no costo).
-        var gastos = new Dictionary<int, (long Neto, long Iva)>();
+        // Gastos del mes (monto pagado).
+        var gastos = new Dictionary<int, long>();
         using (var cn = db.Abrir())
         using (var cmd = cn.CreateCommand())
         {
             cmd.CommandText = """
-                SELECT CAST(substr(fecha, 6, 2) AS INTEGER), COALESCE(SUM(monto - iva), 0), COALESCE(SUM(iva), 0)
+                SELECT CAST(substr(fecha, 6, 2) AS INTEGER), COALESCE(SUM(monto), 0)
                 FROM gastos WHERE substr(fecha, 1, 4) = $a GROUP BY 1;
                 """;
             cmd.Parameters.AddWithValue("$a", anio.ToString("D4"));
             using var r = cmd.ExecuteReader();
-            while (r.Read()) gastos[r.GetInt32(0)] = (r.GetInt64(1), r.GetInt64(2));
+            while (r.Read()) gastos[r.GetInt32(0)] = r.GetInt64(1);
         }
 
         return Enumerable.Range(1, 12)
             .Select(m => (datos.TryGetValue(m, out var d) ? d : new ResumenMensual(anio, m, 0, 0, 0, 0))
-                with { GastosCentimos = gastos.GetValueOrDefault(m).Neto, IvaGastosCentimos = gastos.GetValueOrDefault(m).Iva })
+                with { GastosCentimos = gastos.GetValueOrDefault(m) })
             .ToList();
     }
 
@@ -100,10 +100,8 @@ public class ReporteServicio(BaseDatos db)
             ("Ingresos brutos (IVA incluido)", Dinero.ADecimal(resumen.TotalCentimos), true),
             ("Ingresos netos (sin IVA)", Dinero.ADecimal(resumen.BaseCentimos), true),
             ("Total IVA 13 % (débito fiscal)", Dinero.ADecimal(resumen.IvaCentimos), true),
-            ("Gastos (sin IVA)", Dinero.ADecimal(resumen.GastosCentimos), true),
+            ("Gastos", Dinero.ADecimal(resumen.GastosCentimos), true),
             ("Utilidad (ingresos netos − gastos)", Dinero.ADecimal(resumen.UtilidadCentimos), true),
-            ("IVA de gastos (crédito fiscal)", Dinero.ADecimal(resumen.IvaGastosCentimos), true),
-            ("IVA neto a pagar (negativo = saldo a favor)", Dinero.ADecimal(resumen.IvaNetoCentimos), true),
         };
         for (int i = 0; i < filas.Length; i++)
         {
@@ -149,7 +147,7 @@ public class ReporteServicio(BaseDatos db)
 
         var gastos = GastosMes(anio, mes);
         var hg = wb.Worksheets.Add("Gastos");
-        string[] encGastos = { "Fecha", "Categoría", "Descripción", "Proveedor", "Método", "Monto", "IVA", "Monto sin IVA" };
+        string[] encGastos = { "Fecha", "Categoría", "Detalle", "Método", "Monto" };
         for (int c = 0; c < encGastos.Length; c++) hg.Cell(1, c + 1).Value = encGastos[c];
         hg.Row(1).Style.Font.Bold = true;
         int fg = 2;
@@ -158,20 +156,15 @@ public class ReporteServicio(BaseDatos db)
             hg.Cell(fg, 1).Value = g.Fecha;
             hg.Cell(fg, 1).Style.DateFormat.Format = "dd/MM/yyyy";
             hg.Cell(fg, 2).Value = g.Categoria;
-            hg.Cell(fg, 3).Value = g.Descripcion;
-            hg.Cell(fg, 4).Value = g.Proveedor ?? "";
-            hg.Cell(fg, 5).Value = g.MetodoTexto;
-            hg.Cell(fg, 6).Value = Dinero.ADecimal(g.MontoCentimos);
-            hg.Cell(fg, 7).Value = Dinero.ADecimal(g.IvaCentimos);
-            hg.Cell(fg, 8).Value = Dinero.ADecimal(g.NetoCentimos);
+            hg.Cell(fg, 3).Value = g.Detalle;
+            hg.Cell(fg, 4).Value = g.MetodoTexto;
+            hg.Cell(fg, 5).Value = Dinero.ADecimal(g.MontoCentimos);
             fg++;
         }
-        hg.Cell(fg, 5).Value = "TOTAL";
-        hg.Cell(fg, 6).Value = Dinero.ADecimal(gastos.Sum(g => g.MontoCentimos));
-        hg.Cell(fg, 7).Value = Dinero.ADecimal(gastos.Sum(g => g.IvaCentimos));
-        hg.Cell(fg, 8).Value = Dinero.ADecimal(gastos.Sum(g => g.NetoCentimos));
+        hg.Cell(fg, 4).Value = "TOTAL";
+        hg.Cell(fg, 5).Value = Dinero.ADecimal(gastos.Sum(g => g.MontoCentimos));
         hg.Row(fg).Style.Font.Bold = true;
-        hg.Range(2, 6, fg, 8).Style.NumberFormat.Format = FormatoMoneda;
+        hg.Range(2, 5, fg, 5).Style.NumberFormat.Format = FormatoMoneda;
         hg.Columns().AdjustToContents();
 
         wb.SaveAs(rutaArchivo);
@@ -183,7 +176,7 @@ public class ReporteServicio(BaseDatos db)
         var meses = ResumenAnual(anio);
         using var wb = new XLWorkbook();
         var h = wb.Worksheets.Add($"Flujo de caja {anio}");
-        string[] encabezados = { "Mes", "Órdenes", "Ingresos brutos", "Ingresos netos", "Total IVA 13 %", "Gastos", "Utilidad", "IVA de gastos", "IVA neto a pagar" };
+        string[] encabezados = { "Mes", "Órdenes", "Ingresos brutos", "Ingresos netos", "Total IVA 13 %", "Gastos", "Utilidad" };
         for (int c = 0; c < encabezados.Length; c++) h.Cell(1, c + 1).Value = encabezados[c];
         h.Row(1).Style.Font.Bold = true;
 
@@ -197,8 +190,6 @@ public class ReporteServicio(BaseDatos db)
             h.Cell(fila, 5).Value = Dinero.ADecimal(m.IvaCentimos);
             h.Cell(fila, 6).Value = Dinero.ADecimal(m.GastosCentimos);
             h.Cell(fila, 7).Value = Dinero.ADecimal(m.UtilidadCentimos);
-            h.Cell(fila, 8).Value = Dinero.ADecimal(m.IvaGastosCentimos);
-            h.Cell(fila, 9).Value = Dinero.ADecimal(m.IvaNetoCentimos);
             fila++;
         }
         h.Cell(fila, 1).Value = "TOTAL";
@@ -208,10 +199,8 @@ public class ReporteServicio(BaseDatos db)
         h.Cell(fila, 5).Value = Dinero.ADecimal(meses.Sum(m => m.IvaCentimos));
         h.Cell(fila, 6).Value = Dinero.ADecimal(meses.Sum(m => m.GastosCentimos));
         h.Cell(fila, 7).Value = Dinero.ADecimal(meses.Sum(m => m.UtilidadCentimos));
-        h.Cell(fila, 8).Value = Dinero.ADecimal(meses.Sum(m => m.IvaGastosCentimos));
-        h.Cell(fila, 9).Value = Dinero.ADecimal(meses.Sum(m => m.IvaNetoCentimos));
         h.Row(fila).Style.Font.Bold = true;
-        h.Range(2, 3, fila, 9).Style.NumberFormat.Format = FormatoMoneda;
+        h.Range(2, 3, fila, 7).Style.NumberFormat.Format = FormatoMoneda;
         h.Columns().AdjustToContents();
         wb.SaveAs(rutaArchivo);
     }

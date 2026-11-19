@@ -14,7 +14,9 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
     private readonly DateTimePicker _dtpInicio = Ui.Fecha();
     private readonly TextBox _txtNotas = Ui.Texto(500);
 
-    private readonly ComboBox _cboProducto = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220, Font = Ui.Fuente };
+    private readonly TextBox _buscarProducto = Ui.Texto(150);
+    private readonly ComboBox _cboProducto = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, Font = Ui.Fuente };
+    private List<Producto> _productosActivos = new();
     private readonly CampoMonto _precio = new(120);
     private readonly CampoEntero _cantidad = new(1, 1000);
     private readonly CampoEntero _dias = new(1, 3650);
@@ -35,6 +37,14 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         _cboCliente.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
         _lblTotal.ForeColor = Ui.Primario;
 
+        _buscarProducto.PlaceholderText = "Código o nombre";
+        _buscarProducto.TextChanged += (_, _) => FiltrarProductos();
+        _buscarProducto.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; _cantidad.Focus(); }
+            else if (e.KeyCode == Keys.Down) { e.SuppressKeyPress = true; _cboProducto.Focus(); _cboProducto.DroppedDown = true; }
+        };
+
         Ui.Columna(_grid, "Producto", 200);
         Ui.Columna(_grid, "Precio unit. (IVA incl.)", 120, derecha: true);
         Ui.Columna(_grid, "Cantidad", 60, derecha: true);
@@ -50,6 +60,7 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
 
         var grupoProducto = Ui.Grupo("Agregar producto",
             Ui.Fila(
+                Ui.Etiqueta("Buscar:"), _buscarProducto,
                 Ui.Etiqueta("Producto:"), _cboProducto,
                 Ui.Etiqueta("Precio (IVA incl.) ₡:"), _precio,
                 Ui.Etiqueta("Cantidad:"), _cantidad,
@@ -93,11 +104,32 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         _cboCliente.Items.AddRange(_clientes.Listar().Cast<object>().ToArray());
         Seleccionar(_cboCliente, clienteSel);
 
-        _cboProducto.Items.Clear();
-        _cboProducto.Items.AddRange(_productos.Listar(soloActivos: true).Cast<object>().ToArray());
-        Seleccionar(_cboProducto, productoSel);
-        if (_cboProducto.SelectedIndex < 0 && _cboProducto.Items.Count > 0) _cboProducto.SelectedIndex = 0;
+        _productosActivos = _productos.Listar(soloActivos: true);
+        FiltrarProductos(productoSel);
     }
+
+    /// <summary>Muestra en la lista solo los productos cuyo código o nombre contienen lo buscado.</summary>
+    private void FiltrarProductos(long? mantener = null)
+    {
+        mantener ??= (_cboProducto.SelectedItem as Producto)?.Id;
+        string b = SinTildes(_buscarProducto.Text.Trim());
+        var visibles = b.Length == 0
+            ? _productosActivos
+            : _productosActivos.Where(p => SinTildes(p.Codigo).Contains(b, StringComparison.OrdinalIgnoreCase)
+                                        || SinTildes(p.Nombre).Contains(b, StringComparison.OrdinalIgnoreCase)).ToList();
+        _cboProducto.BeginUpdate();
+        _cboProducto.Items.Clear();
+        _cboProducto.Items.AddRange(visibles.Cast<object>().ToArray());
+        _cboProducto.EndUpdate();
+        Seleccionar(_cboProducto, mantener);
+        if (_cboProducto.SelectedIndex < 0 && _cboProducto.Items.Count > 0) _cboProducto.SelectedIndex = 0;
+        _buscarProducto.BackColor = b.Length > 0 && visibles.Count == 0 ? Color.MistyRose : SystemColors.Window;
+    }
+
+    private static string SinTildes(string s) =>
+        new string(s.Normalize(System.Text.NormalizationForm.FormD)
+            .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) != System.Globalization.UnicodeCategory.NonSpacingMark)
+            .ToArray());
 
     private static void Seleccionar(ComboBox cbo, long? id)
     {
@@ -142,6 +174,8 @@ internal sealed class NuevaOrdenControl : UserControl, IRefrescable
         _lineas.Add(linea);
         _cantidad.Valor = 1;
         MostrarLineas();
+        _buscarProducto.Clear();
+        _buscarProducto.Focus();
     }
 
     private void QuitarLinea()

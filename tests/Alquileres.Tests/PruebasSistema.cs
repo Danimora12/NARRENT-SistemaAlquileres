@@ -56,6 +56,7 @@ public sealed class PruebasBaseDatos : IDisposable
     private readonly ClienteRepositorio _clientes;
     private readonly OrdenRepositorio _ordenes;
     private readonly ReporteServicio _reporte;
+    private int _siguienteId;
 
     public PruebasBaseDatos()
     {
@@ -74,7 +75,7 @@ public sealed class PruebasBaseDatos : IDisposable
 
     private Cliente NuevoCliente(string nombre = "Ana Solís")
     {
-        var c = new Cliente { Nombre = nombre, Telefono = "8888-8888" };
+        var c = new Cliente { Nombre = nombre, Telefono = "8888-8888", TipoIdentificacion = TipoIdentificacion.Pasaporte, Identificacion = "P" + (++_siguienteId).ToString("D6") };
         _clientes.Guardar(c);
         return c;
     }

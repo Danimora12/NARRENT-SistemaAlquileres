@@ -23,8 +23,6 @@ internal sealed class FlujoCajaControl : UserControl, IRefrescable
         Ui.Columna(_gridMeses, "Total IVA 13 %", 130, derecha: true);
         Ui.Columna(_gridMeses, "Gastos", 120, derecha: true);
         Ui.Columna(_gridMeses, "Utilidad", 130, derecha: true);
-        Ui.Columna(_gridMeses, "IVA de gastos", 110, derecha: true);
-        Ui.Columna(_gridMeses, "IVA neto a pagar", 130, derecha: true);
         _gridMeses.SelectionChanged += (_, _) => Ui.Intentar(MostrarDetalle);
 
         Ui.Columna(_gridDetalle, "N°", 85);
@@ -45,10 +43,8 @@ internal sealed class FlujoCajaControl : UserControl, IRefrescable
         var nota = Ui.Etiqueta(
             "Ingresos brutos = lo cobrado con IVA incluido (ya con descuentos). Ingresos netos = sin IVA. El mes lo define la fecha de la orden. " +
             "El Total IVA es el IVA cobrado (débito fiscal): el IVA a pagar en el formulario 150 de TRIBU-CR es este monto menos el IVA de las compras del negocio. " +
-            "No se cuentan órdenes anuladas ni eliminadas. Gastos = gastos del mes sin el IVA de sus facturas (pestaña Gastos). " +
-            "Utilidad = ingresos netos − gastos, antes del impuesto sobre la renta. " +
-            "IVA neto a pagar = Total IVA − IVA de las facturas de gastos (crédito fiscal); si es negativo, es saldo a favor. " +
-            "Es una estimación: solo cuenta como crédito el IVA de facturas electrónicas a nombre del negocio. Confírmelo con el contador.");
+            "No se cuentan órdenes anuladas ni eliminadas. Gastos = monto pagado de los gastos del mes (pestaña Gastos). " +
+            "Utilidad = ingresos netos − gastos, antes del impuesto sobre la renta.");
         nota.ForeColor = Color.DimGray;
         nota.MaximumSize = new Size(1100, 0);
 
@@ -79,23 +75,20 @@ internal sealed class FlujoCajaControl : UserControl, IRefrescable
         foreach (var m in meses)
         {
             int i = _gridMeses.Rows.Add(m.NombreMes, m.CantidadOrdenes, Ui.Fmt(m.TotalCentimos),
-                Ui.Fmt(m.BaseCentimos), Ui.Fmt(m.IvaCentimos), Ui.Fmt(m.GastosCentimos), FmtUtilidad(m.UtilidadCentimos),
-                Ui.Fmt(m.IvaGastosCentimos), FmtIvaNeto(m.IvaNetoCentimos));
+                Ui.Fmt(m.BaseCentimos), Ui.Fmt(m.IvaCentimos), Ui.Fmt(m.GastosCentimos), FmtUtilidad(m.UtilidadCentimos));
             _gridMeses.Rows[i].Tag = m;
             if (m.CantidadOrdenes == 0 && m.GastosCentimos == 0) _gridMeses.Rows[i].DefaultCellStyle.ForeColor = Color.Gray;
             var celdaUtilidad = _gridMeses.Rows[i].Cells[6];
             celdaUtilidad.Style.Font = Ui.FuenteNegrita;
             if (m.UtilidadCentimos < 0) celdaUtilidad.Style.ForeColor = Color.Firebrick;
             else if (m.UtilidadCentimos > 0) celdaUtilidad.Style.ForeColor = Color.ForestGreen;
-            _gridMeses.Rows[i].Cells[8].Style.Font = Ui.FuenteNegrita;
         }
         _totalAnio.Text = $"Total {Anio}:  {meses.Sum(m => m.CantidadOrdenes)} órdenes · " +
                           $"Ingresos brutos {Ui.Fmt(meses.Sum(m => m.TotalCentimos))} · " +
                           $"Ingresos netos {Ui.Fmt(meses.Sum(m => m.BaseCentimos))} · " +
                           $"Total IVA {Ui.Fmt(meses.Sum(m => m.IvaCentimos))} · " +
                           $"Gastos {Ui.Fmt(meses.Sum(m => m.GastosCentimos))} · " +
-                          $"Utilidad {FmtUtilidad(meses.Sum(m => m.UtilidadCentimos))} · " +
-                          $"IVA neto {FmtIvaNeto(meses.Sum(m => m.IvaNetoCentimos))}";
+                          $"Utilidad {FmtUtilidad(meses.Sum(m => m.UtilidadCentimos))}";
 
         _gridMeses.ClearSelection();
         _gridMeses.CurrentCell = _gridMeses.Rows[mesAntes - 1].Cells[0];
@@ -103,7 +96,6 @@ internal sealed class FlujoCajaControl : UserControl, IRefrescable
     }
 
     private static string FmtUtilidad(long centimos) => centimos < 0 ? "−" + Ui.Fmt(-centimos) : Ui.Fmt(centimos);
-    private static string FmtIvaNeto(long centimos) => centimos < 0 ? $"{Ui.Fmt(-centimos)} a favor" : Ui.Fmt(centimos);
 
     private void MostrarDetalle()
     {

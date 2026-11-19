@@ -5,19 +5,15 @@ namespace Alquileres.Core;
 /// <summary>Error de validación con un mensaje apto para mostrar al usuario.</summary>
 public class ReglaNegocioException(string mensaje) : Exception(mensaje);
 
-public class ProductoRepositorio(BaseDatos db)
+public partial class ProductoRepositorio(BaseDatos db)
 {
-    private const string SelectProductos = """
-        SELECT p.id, p.nombre, p.precio_con_iva, p.activo, p.inventario,
-               (SELECT COUNT(*) FROM producto_variantes v WHERE v.producto_id = p.id)
-        FROM productos p
-        """;
+    private const string SelectProductos = "SELECT p.id, p.codigo, p.nombre, p.precio_con_iva, p.activo, p.inventario FROM productos p";
 
     public List<Producto> Listar(bool soloActivos = false)
     {
         using var cn = db.Abrir();
         using var cmd = cn.CreateCommand();
-        cmd.CommandText = SelectProductos + (soloActivos ? " WHERE p.activo = 1" : "") + " ORDER BY p.nombre;";
+        cmd.CommandText = SelectProductos + (soloActivos ? " WHERE p.activo = 1" : "") + " ORDER BY p.codigo;";
         return Leer(cmd);
     }
 
@@ -38,19 +34,25 @@ public class ProductoRepositorio(BaseDatos db)
             lista.Add(new Producto
             {
                 Id = r.GetInt64(0),
-                Nombre = r.GetString(1),
-                PrecioConIvaCentimos = r.GetInt64(2),
-                Activo = r.GetInt64(3) == 1,
-                Inventario = r.GetInt32(4),
-                CantidadVariantes = r.GetInt32(5)
+                Codigo = r.GetString(1),
+                Nombre = r.GetString(2),
+                PrecioConIvaCentimos = r.GetInt64(3),
+                Activo = r.GetInt64(4) == 1,
+                Inventario = r.GetInt32(5)
             });
         return lista;
     }
 
+    /// <summary>Código que se le asignaría a un producto nuevo con este nombre (ej. "Manteles" → MAN001).</summary>
+    public string SugerirCodigo(string nombre)
+    {
+        using var cn = db.Abrir();
+        return SiguienteCodigo(cn, null, nombre);
+    }
+
     /// <summary>
-    /// Crea o actualiza un producto y lo deja en Logs con el empleado que autorizó.
-    /// Si el producto tiene características de inventario, el inventario total
-    /// no se toma de aquí (es la suma de las características).
+    /// Crea o actualiza un producto y lo deja en Logs. Si no trae código, se genera.
+    /// Poner o cambiar el código a mano solo lo puede hacer un administrador.
     /// </summary>
     public void Guardar(Producto p, string? empleado = null)
     {
@@ -62,17 +64,25 @@ public class ProductoRepositorio(BaseDatos db)
 
         using var cn = db.Abrir();
         using var tx = cn.BeginTransaction();
+
+        string codigo = NormalizarCodigo(p.Codigo);
+        bool manual = antes is null ? codigo.Length > 0 : codigo != antes.Codigo;
+        if (codigo.Length == 0) codigo = antes?.Codigo ?? SiguienteCodigo(cn, tx, p.Nombre);
+        if (manual)
+        {
+            if (db.UsuarioActual?.EsAdministrador != true)
+                throw new ReglaNegocioException("Solo un administrador puede asignar o cambiar el código de un producto.");
+            if (!FormatoCodigo().IsMatch(codigo))
+                throw new ReglaNegocioException("El código debe tener de 3 a 15 caracteres: letras sin tildes, números o guion.");
+        }
+
         using (var cmd = cn.CreateCommand())
         {
             cmd.Transaction = tx;
             cmd.CommandText = p.Id == 0
-                ? "INSERT INTO productos (nombre, precio_con_iva, activo, inventario) VALUES ($n, $p, $a, $inv) RETURNING id;"
-                : """
-                  UPDATE productos SET nombre = $n, precio_con_iva = $p, activo = $a,
-                         inventario = CASE WHEN EXISTS (SELECT 1 FROM producto_variantes WHERE producto_id = $id)
-                                           THEN inventario ELSE $inv END
-                  WHERE id = $id RETURNING id;
-                  """;
+                ? "INSERT INTO productos (codigo, nombre, precio_con_iva, activo, inventario) VALUES ($cod, $n, $p, $a, $inv) RETURNING id;"
+                : "UPDATE productos SET codigo = $cod, nombre = $n, precio_con_iva = $p, activo = $a, inventario = $inv WHERE id = $id RETURNING id;";
+            cmd.Parameters.AddWithValue("$cod", codigo);
             cmd.Parameters.AddWithValue("$n", p.Nombre.Trim());
             cmd.Parameters.AddWithValue("$p", p.PrecioConIvaCentimos);
             cmd.Parameters.AddWithValue("$a", p.Activo ? 1 : 0);
@@ -84,115 +94,104 @@ public class ProductoRepositorio(BaseDatos db)
             }
             catch (SqliteException ex) when (ex.SqliteErrorCode == 19) // UNIQUE
             {
-                throw new ReglaNegocioException($"Ya existe un producto llamado \"{p.Nombre.Trim()}\".");
+                throw new ReglaNegocioException(ex.Message.Contains("codigo")
+                    ? $"Ya existe un producto con el código \"{codigo}\"."
+                    : $"Ya existe un producto llamado \"{p.Nombre.Trim()}\".");
             }
         }
+        p.Codigo = codigo;
 
         if (antes is null)
         {
-            LogRepositorio.Registrar(cn, tx, empleado, "Producto creado", $"Producto {p.Nombre.Trim()}",
-                $"Precio {Dinero.Formatear(p.PrecioConIvaCentimos)} · Inventario {p.Inventario} · Disponible {(p.Activo ? "Sí" : "No")}");
+            LogRepositorio.Registrar(db, cn, tx, empleado, "Producto creado", $"Producto {codigo} {p.Nombre.Trim()}",
+                $"Código {codigo} · Precio {Dinero.Formatear(p.PrecioConIvaCentimos)} · Inventario {p.Inventario} · Disponible {(p.Activo ? "Sí" : "No")}");
         }
         else
         {
             var cambios = new Cambios()
+                .Campo("Código", antes.Codigo, codigo)
                 .Campo("Nombre", antes.Nombre, p.Nombre.Trim())
                 .Monto("Precio", antes.PrecioConIvaCentimos, p.PrecioConIvaCentimos)
+                .Campo("Inventario", antes.Inventario, p.Inventario)
                 .Campo("Disponible", antes.Activo, p.Activo);
-            if (!antes.TieneVariantes) cambios.Campo("Inventario", antes.Inventario, p.Inventario);
             if (cambios.HayCambios)
-                LogRepositorio.Registrar(cn, tx, empleado, "Producto editado", $"Producto {p.Nombre.Trim()}", cambios.ToString());
+                LogRepositorio.Registrar(db, cn, tx, empleado, "Producto editado", $"Producto {codigo} {p.Nombre.Trim()}", cambios.ToString());
         }
         tx.Commit();
-    }
-
-    public List<VarianteInventario> ListarVariantes(long productoId)
-    {
-        using var cn = db.Abrir();
-        return ListarVariantes(cn, null, productoId);
-    }
-
-    private static List<VarianteInventario> ListarVariantes(SqliteConnection cn, SqliteTransaction? tx, long productoId)
-    {
-        using var cmd = cn.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT id, descripcion, cantidad FROM producto_variantes WHERE producto_id = $p ORDER BY id;";
-        cmd.Parameters.AddWithValue("$p", productoId);
-        using var r = cmd.ExecuteReader();
-        var lista = new List<VarianteInventario>();
-        while (r.Read())
-            lista.Add(new VarianteInventario
-            {
-                Id = r.GetInt64(0),
-                ProductoId = productoId,
-                Descripcion = r.GetString(1),
-                Cantidad = r.GetInt32(2)
-            });
-        return lista;
     }
 
     /// <summary>
-    /// Reemplaza las características de inventario del producto (ej. colores y cantidad
-    /// por color). Si quedan características, el inventario total pasa a ser su suma.
+    /// Elimina un producto que nunca se usó en una orden (ni siquiera en órdenes anuladas o
+    /// eliminadas): las órdenes guardan a qué producto pertenece cada línea. Si ya se usó,
+    /// hay que desactivarlo. Queda en Logs.
     /// </summary>
-    public void GuardarVariantes(long productoId, IEnumerable<VarianteInventario> variantes, string? empleado = null)
+    public void Eliminar(long id, string empleado)
     {
-        var nuevas = variantes
-            .Select(v => new VarianteInventario { ProductoId = productoId, Descripcion = (v.Descripcion ?? "").Trim(), Cantidad = v.Cantidad })
-            .ToList();
-        if (nuevas.Any(v => v.Descripcion.Length == 0))
-            throw new ReglaNegocioException("Cada característica necesita una descripción (por ejemplo, el color).");
-        if (nuevas.Any(v => v.Cantidad < 0))
-            throw new ReglaNegocioException("Las cantidades no pueden ser negativas.");
-        var repetida = nuevas.GroupBy(v => v.Descripcion, StringComparer.OrdinalIgnoreCase).FirstOrDefault(g => g.Count() > 1);
-        if (repetida is not null)
-            throw new ReglaNegocioException($"La característica \"{repetida.Key}\" está repetida.");
-
-        var producto = Obtener(productoId) ?? throw new ReglaNegocioException("El producto ya no existe.");
-
+        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización con el código de confirmación.");
+        var p = Obtener(id) ?? throw new ReglaNegocioException("El producto ya no existe.");
         using var cn = db.Abrir();
+        long usos = BaseDatos.Escalar<long>(cn, $"SELECT COUNT(DISTINCT orden_id) FROM orden_lineas WHERE producto_id = {id};");
+        if (usos > 0)
+            throw new ReglaNegocioException(
+                $"No se puede eliminar {p.Codigo} \"{p.Nombre}\": aparece en {usos} {(usos == 1 ? "orden" : "órdenes")}. " +
+                "Si ya no se alquila, use \"Activar / desactivar\" para que no aparezca en órdenes nuevas.");
         using var tx = cn.BeginTransaction();
-        var anteriores = ListarVariantes(cn, tx, productoId);
-
-        BaseDatos.Ejecutar(cn, tx, $"DELETE FROM producto_variantes WHERE producto_id = {productoId};");
-        foreach (var v in nuevas)
-        {
-            using var cmd = cn.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = "INSERT INTO producto_variantes (producto_id, descripcion, cantidad) VALUES ($p, $d, $c) RETURNING id;";
-            cmd.Parameters.AddWithValue("$p", productoId);
-            cmd.Parameters.AddWithValue("$d", v.Descripcion);
-            cmd.Parameters.AddWithValue("$c", v.Cantidad);
-            v.Id = (long)cmd.ExecuteScalar()!;
-        }
-        if (nuevas.Count > 0)
-            BaseDatos.Ejecutar(cn, tx, $"UPDATE productos SET inventario = {nuevas.Sum(v => v.Cantidad)} WHERE id = {productoId};");
-
-        static string Describir(List<VarianteInventario> l) =>
-            l.Count == 0 ? "sin características" : $"{string.Join(", ", l.Select(v => $"{v.Descripcion} {v.Cantidad}"))} (total {l.Sum(v => v.Cantidad)})";
-
-        string antes = Describir(anteriores), despues = Describir(nuevas);
-        if (antes != despues)
-            LogRepositorio.Registrar(cn, tx, empleado, "Inventario actualizado", $"Producto {producto.Nombre}",
-                $"Antes: {antes} → Ahora: {despues}");
+        BaseDatos.Ejecutar(cn, tx, $"DELETE FROM productos WHERE id = {id};");
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Producto eliminado", $"Producto {p.Codigo} {p.Nombre}",
+            $"Código {p.Codigo} · Precio {Dinero.Formatear(p.PrecioConIvaCentimos)} · Inventario {p.Inventario}");
         tx.Commit();
+    }
+
+    // ---------- Códigos ----------
+
+    [System.Text.RegularExpressions.GeneratedRegex("^[A-Z0-9-]{3,15}$")]
+    private static partial System.Text.RegularExpressions.Regex FormatoCodigo();
+
+    public static string NormalizarCodigo(string? codigo) => (codigo ?? "").Trim().ToUpperInvariant();
+
+    /// <summary>Primeras 3 letras del nombre, sin tildes y en mayúsculas ("Ñandú" → NAN). Si faltan, se completa con X.</summary>
+    public static string Prefijo(string nombre)
+    {
+        string sinTildes = new string((nombre ?? "").Normalize(System.Text.NormalizationForm.FormD)
+            .Where(ch => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) != System.Globalization.UnicodeCategory.NonSpacingMark)
+            .ToArray()).ToUpperInvariant();
+        string letras = new string(sinTildes.Where(ch => ch is >= 'A' and <= 'Z').Take(3).ToArray());
+        return letras.PadRight(3, 'X');
+    }
+
+    /// <summary>Prefijo + el consecutivo de 3 dígitos siguiente para ese prefijo (MAN001, MAN002…).</summary>
+    internal static string SiguienteCodigo(SqliteConnection cn, SqliteTransaction? tx, string nombre)
+    {
+        string prefijo = Prefijo(nombre);
+        using var cmd = cn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT codigo FROM productos WHERE codigo LIKE $p;";
+        cmd.Parameters.AddWithValue("$p", prefijo + "___");
+        int max = 0;
+        using (var r = cmd.ExecuteReader())
+            while (r.Read())
+                if (int.TryParse(r.GetString(0).AsSpan(3), out int n) && n > max) max = n;
+        if (max >= 999)
+            throw new ReglaNegocioException($"Ya se usaron los 999 códigos que empiezan con {prefijo}. Un administrador debe asignar el código a mano.");
+        return $"{prefijo}{max + 1:D3}";
     }
 }
 
 public class ClienteRepositorio(BaseDatos db)
 {
-    private const string SelectClientes = "SELECT id, nombre, identificacion, telefono, correo, notas FROM clientes";
+    private const string SelectClientes = "SELECT id, nombre, identificacion, telefono, correo, notas, tipo_identificacion FROM clientes";
 
     public List<Cliente> Listar(string? filtro = null)
     {
         using var cn = db.Abrir();
         using var cmd = cn.CreateCommand();
         cmd.CommandText = SelectClientes + """
-             WHERE $f IS NULL OR nombre LIKE $f OR identificacion LIKE $f OR telefono LIKE $f
+             WHERE $f IS NULL OR nombre LIKE $f OR identificacion LIKE $f OR identificacion LIKE $fn OR telefono LIKE $f
             ORDER BY nombre;
             """;
         cmd.Parameters.AddWithValue("$f",
             string.IsNullOrWhiteSpace(filtro) ? DBNull.Value : $"%{filtro.Trim()}%");
+        cmd.Parameters.AddWithValue("$fn", $"%{Identificaciones.Normalizar(filtro)}%");
         return Leer(cmd);
     }
 
@@ -217,15 +216,38 @@ public class ClienteRepositorio(BaseDatos db)
                 Identificacion = r.IsDBNull(2) ? null : r.GetString(2),
                 Telefono = r.IsDBNull(3) ? null : r.GetString(3),
                 Correo = r.IsDBNull(4) ? null : r.GetString(4),
-                Notas = r.IsDBNull(5) ? null : r.GetString(5)
+                Notas = r.IsDBNull(5) ? null : r.GetString(5),
+                TipoIdentificacion = r.IsDBNull(6) ? null : Enum.Parse<TipoIdentificacion>(r.GetString(6))
             });
         return lista;
     }
 
-    /// <summary>Crea o edita un cliente. Las ediciones quedan en Logs con el empleado que autorizó.</summary>
+    /// <summary>Busca otro cliente con el mismo número de identificación (sin importar guiones ni el tipo).</summary>
+    public Cliente? BuscarPorIdentificacion(string? numero, long excluirId = 0)
+    {
+        string n = Identificaciones.Normalizar(numero);
+        if (n.Length == 0) return null;
+        using var cn = db.Abrir();
+        using var cmd = cn.CreateCommand();
+        cmd.CommandText = SelectClientes + """
+             WHERE id <> $id AND upper(replace(replace(identificacion, '-', ''), ' ', '')) = $n LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$id", excluirId);
+        cmd.Parameters.AddWithValue("$n", n);
+        return Leer(cmd).FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Crea o edita un cliente. El tipo y el número de identificación son obligatorios,
+    /// deben tener el formato del tipo y no pueden repetirse. Las ediciones quedan en Logs.
+    /// </summary>
     public void Guardar(Cliente c, string? empleado = null)
     {
         if (string.IsNullOrWhiteSpace(c.Nombre)) throw new ReglaNegocioException("El nombre del cliente es obligatorio.");
+        if (c.TipoIdentificacion is not { } tipo) throw new ReglaNegocioException("Seleccione el tipo de identificación.");
+        c.Identificacion = Identificaciones.Validar(tipo, c.Identificacion);
+        if (BuscarPorIdentificacion(c.Identificacion, c.Id) is { } otro)
+            throw new ReglaNegocioException($"Ya existe un cliente con la identificación {Identificaciones.Formatear(tipo, c.Identificacion)}: \"{otro.Nombre}\". Selecciónelo en la lista en lugar de crearlo de nuevo.");
         var antes = c.Id == 0 ? null : Obtener(c.Id) ?? throw new ReglaNegocioException("El cliente ya no existe.");
 
         using var cn = db.Abrir();
@@ -234,32 +256,41 @@ public class ClienteRepositorio(BaseDatos db)
         {
             cmd.Transaction = tx;
             cmd.CommandText = c.Id == 0
-                ? "INSERT INTO clientes (nombre, identificacion, telefono, correo, notas) VALUES ($n, $i, $t, $c, $no) RETURNING id;"
-                : "UPDATE clientes SET nombre=$n, identificacion=$i, telefono=$t, correo=$c, notas=$no WHERE id=$id RETURNING id;";
+                ? "INSERT INTO clientes (nombre, tipo_identificacion, identificacion, telefono, correo, notas) VALUES ($n, $ti, $i, $t, $c, $no) RETURNING id;"
+                : "UPDATE clientes SET nombre=$n, tipo_identificacion=$ti, identificacion=$i, telefono=$t, correo=$c, notas=$no WHERE id=$id RETURNING id;";
+            cmd.Parameters.AddWithValue("$ti", tipo.ToString());
             cmd.Parameters.AddWithValue("$n", c.Nombre.Trim());
             cmd.Parameters.AddWithValue("$i", Nulo(c.Identificacion));
             cmd.Parameters.AddWithValue("$t", Nulo(c.Telefono));
             cmd.Parameters.AddWithValue("$c", Nulo(c.Correo));
             cmd.Parameters.AddWithValue("$no", Nulo(c.Notas));
             cmd.Parameters.AddWithValue("$id", c.Id);
-            c.Id = (long)cmd.ExecuteScalar()!;
+            try
+            {
+                c.Id = (long)cmd.ExecuteScalar()!;
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 19) // índice único (otra ventana lo creó a la vez)
+            {
+                throw new ReglaNegocioException($"Ya existe un cliente con la identificación {c.IdentificacionFormateada}.");
+            }
         }
 
         if (antes is null)
         {
-            LogRepositorio.Registrar(cn, tx, empleado, "Cliente creado", $"Cliente {c.Nombre.Trim()}",
-                string.Join(" · ", new[] { c.Identificacion, c.Telefono, c.Correo }.Where(x => !string.IsNullOrWhiteSpace(x)).DefaultIfEmpty("Sin datos adicionales")));
+            LogRepositorio.Registrar(db, cn, tx, empleado, "Cliente creado", $"Cliente {c.Nombre.Trim()}",
+                string.Join(" · ", new[] { $"{c.TipoIdentificacionTexto} {c.IdentificacionFormateada}", c.Telefono, c.Correo }.Where(x => !string.IsNullOrWhiteSpace(x))));
         }
         else
         {
             var cambios = new Cambios()
                 .Campo("Nombre", antes.Nombre, c.Nombre)
+                .Campo("Tipo de identificación", antes.TipoIdentificacionTexto, c.TipoIdentificacionTexto)
                 .Campo("Identificación", antes.Identificacion, c.Identificacion)
                 .Campo("Teléfono", antes.Telefono, c.Telefono)
                 .Campo("Correo", antes.Correo, c.Correo)
                 .Campo("Notas", antes.Notas, c.Notas);
             if (cambios.HayCambios)
-                LogRepositorio.Registrar(cn, tx, empleado, "Cliente editado", $"Cliente {c.Nombre.Trim()}", cambios.ToString());
+                LogRepositorio.Registrar(db, cn, tx, empleado, "Cliente editado", $"Cliente {c.Nombre.Trim()}", cambios.ToString());
         }
         tx.Commit();
     }
@@ -274,7 +305,7 @@ public class ClienteRepositorio(BaseDatos db)
             throw new ReglaNegocioException("No se puede eliminar: el cliente tiene órdenes registradas.");
         using var tx = cn.BeginTransaction();
         BaseDatos.Ejecutar(cn, tx, $"DELETE FROM clientes WHERE id = {id};");
-        LogRepositorio.Registrar(cn, tx, empleado, "Cliente eliminado", $"Cliente {c.Nombre}",
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Cliente eliminado", $"Cliente {c.Nombre}",
             string.Join(" · ", new[] { c.Identificacion, c.Telefono }.Where(x => !string.IsNullOrWhiteSpace(x)).DefaultIfEmpty("—")));
         tx.Commit();
     }
@@ -376,7 +407,7 @@ public class OrdenRepositorio(BaseDatos db)
         detalle.Add(o.PagadoCentimos > 0
             ? $"Pago inicial {Dinero.Formatear(o.PagadoCentimos)} ({pagoInicial!.MetodoTexto}) · Saldo {Dinero.Formatear(o.SaldoCentimos)}"
             : "Sin pago inicial");
-        LogRepositorio.Registrar(cn, tx, null, "Orden creada", Ref(o), string.Join(" · ", detalle));
+        LogRepositorio.Registrar(db, cn, tx, null, "Orden creada", Ref(o), string.Join(" · ", detalle));
 
         tx.Commit();
         return o.Id;
@@ -516,7 +547,7 @@ public class OrdenRepositorio(BaseDatos db)
         using var tx = cn.BeginTransaction();
         InsertarPago(cn, tx, pago);
         long saldo = o.SaldoCentimos - pago.MontoCentimos;
-        LogRepositorio.Registrar(cn, tx, null, saldo == 0 ? "Cuenta cancelada" : "Abono registrado", Ref(o),
+        LogRepositorio.Registrar(db, cn, tx, null, saldo == 0 ? "Cuenta cancelada" : "Abono registrado", Ref(o),
             $"{Dinero.Formatear(pago.MontoCentimos)} por {pago.MetodoTexto} ({pago.Fecha:dd/MM/yyyy}) · Saldo {Dinero.Formatear(saldo)}");
         tx.Commit();
         return pago;
@@ -525,7 +556,7 @@ public class OrdenRepositorio(BaseDatos db)
     /// <summary>Corrige un pago registrado por error. Requiere autorización.</summary>
     public void EliminarPago(long pagoId, string empleado)
     {
-        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización del empleado.");
+        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización con el código de confirmación.");
         long ordenId;
         using (var cn0 = db.Abrir())
             ordenId = BaseDatos.Escalar<long>(cn0, $"SELECT orden_id FROM pagos WHERE id = {pagoId};");
@@ -537,7 +568,7 @@ public class OrdenRepositorio(BaseDatos db)
         using var cn = db.Abrir();
         using var tx = cn.BeginTransaction();
         BaseDatos.Ejecutar(cn, tx, $"DELETE FROM pagos WHERE id = {pagoId};");
-        LogRepositorio.Registrar(cn, tx, empleado, "Pago eliminado", Ref(o),
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Pago eliminado", Ref(o),
             $"{Dinero.Formatear(p.MontoCentimos)} por {p.MetodoTexto} ({p.Fecha:dd/MM/yyyy}) · Nuevo saldo {Dinero.Formatear(o.SaldoCentimos + p.MontoCentimos)}");
         tx.Commit();
     }
@@ -558,7 +589,7 @@ public class OrdenRepositorio(BaseDatos db)
             cmd.Parameters.AddWithValue("$id", id);
             cmd.ExecuteNonQuery();
         }
-        LogRepositorio.Registrar(cn, tx, null, "Notas editadas", Ref(o), cambios.ToString());
+        LogRepositorio.Registrar(db, cn, tx, null, "Notas editadas", Ref(o), cambios.ToString());
         tx.Commit();
     }
 
@@ -580,7 +611,7 @@ public class OrdenRepositorio(BaseDatos db)
             cmd.Parameters.AddWithValue("$id", id);
             cmd.ExecuteNonQuery();
         }
-        LogRepositorio.Registrar(cn, tx, null, "Orden devuelta", Ref(o), $"Fecha de devolución {fechaDevolucion:dd/MM/yyyy}");
+        LogRepositorio.Registrar(db, cn, tx, null, "Orden devuelta", Ref(o), $"Fecha de devolución {fechaDevolucion:dd/MM/yyyy}");
         tx.Commit();
     }
 
@@ -604,7 +635,7 @@ public class OrdenRepositorio(BaseDatos db)
             cmd.Parameters.AddWithValue("$id", id);
             cmd.ExecuteNonQuery();
         }
-        LogRepositorio.Registrar(cn, tx, empleado, "Orden anulada", Ref(o),
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Orden anulada", Ref(o),
             $"Total {Dinero.Formatear(o.TotalCentimos)} · Pagado {Dinero.Formatear(o.PagadoCentimos)} · Motivo: {motivo.Trim()}");
         tx.Commit();
     }
@@ -615,7 +646,7 @@ public class OrdenRepositorio(BaseDatos db)
     /// </summary>
     public void Eliminar(long id, string empleado, string motivo)
     {
-        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización del empleado.");
+        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización con el código de confirmación.");
         if (string.IsNullOrWhiteSpace(motivo)) throw new ReglaNegocioException("Indique el motivo de la eliminación.");
         var o = Obtener(id) ?? throw new ReglaNegocioException("La orden no existe.");
         if (o.Eliminada) throw new ReglaNegocioException("La orden ya está eliminada.");
@@ -635,7 +666,7 @@ public class OrdenRepositorio(BaseDatos db)
             cmd.Parameters.AddWithValue("$id", id);
             cmd.ExecuteNonQuery();
         }
-        LogRepositorio.Registrar(cn, tx, empleado, "Orden eliminada", Ref(o),
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Orden eliminada", Ref(o),
             $"Cliente {o.ClienteNombre} · Fecha {o.Fecha:dd/MM/yyyy} · Estado {o.Estado} · Total {Dinero.Formatear(o.TotalCentimos)} · " +
             $"Pagado {Dinero.Formatear(o.PagadoCentimos)} · Motivo: {motivo.Trim()}");
         tx.Commit();
@@ -643,7 +674,7 @@ public class OrdenRepositorio(BaseDatos db)
 
     public void Restaurar(long id, string empleado)
     {
-        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización del empleado.");
+        if (string.IsNullOrWhiteSpace(empleado)) throw new ReglaNegocioException("Falta la autorización con el código de confirmación.");
         var o = Obtener(id) ?? throw new ReglaNegocioException("La orden no existe.");
         if (!o.Eliminada) throw new ReglaNegocioException("La orden no está eliminada.");
 
@@ -651,7 +682,7 @@ public class OrdenRepositorio(BaseDatos db)
         using var tx = cn.BeginTransaction();
         BaseDatos.Ejecutar(cn, tx,
             $"UPDATE ordenes SET eliminada = 0, eliminada_en = NULL, eliminada_por = NULL, motivo_eliminacion = NULL WHERE id = {id};");
-        LogRepositorio.Registrar(cn, tx, empleado, "Orden restaurada", Ref(o),
+        LogRepositorio.Registrar(db, cn, tx, empleado, "Orden restaurada", Ref(o),
             $"Había sido eliminada el {o.EliminadaEn:dd/MM/yyyy HH:mm} por {o.EliminadaPor} (motivo: {o.MotivoEliminacion})");
         tx.Commit();
     }

@@ -4,19 +4,14 @@ namespace Alquileres.Core;
 public class Producto
 {
     public long Id { get; set; }
+    /// <summary>Código único: 3 letras del nombre + consecutivo (ej. MAN001). Solo un administrador lo cambia a mano.</summary>
+    public string Codigo { get; set; } = "";
     public string Nombre { get; set; } = "";
     /// <summary>Precio con IVA incluido, en céntimos (₡1 = 100).</summary>
     public long PrecioConIvaCentimos { get; set; }
     public bool Activo { get; set; } = true;
-    /// <summary>
-    /// Cantidad en inventario. Si el producto tiene características (variantes),
-    /// es la suma de sus cantidades y no se edita a mano.
-    /// </summary>
+    /// <summary>Cantidad en inventario.</summary>
     public int Inventario { get; set; }
-    /// <summary>Cantidad de características de inventario registradas (ej. colores).</summary>
-    public int CantidadVariantes { get; set; }
-
-    public bool TieneVariantes => CantidadVariantes > 0;
 
     public decimal PrecioConIva
     {
@@ -24,29 +19,26 @@ public class Producto
         set => PrecioConIvaCentimos = Dinero.ACentimos(value);
     }
 
-    public override string ToString() => Nombre;
-}
-
-/// <summary>Característica de inventario de un producto. Ej.: Manteles → "Blanco", 20.</summary>
-public class VarianteInventario
-{
-    public long Id { get; set; }
-    public long ProductoId { get; set; }
-    public string Descripcion { get; set; } = "";
-    public int Cantidad { get; set; }
+    public override string ToString() => string.IsNullOrEmpty(Codigo) ? Nombre : $"{Codigo} — {Nombre}";
 }
 
 public class Cliente
 {
     public long Id { get; set; }
     public string Nombre { get; set; } = "";
+    /// <summary>Null solo en clientes creados antes de que el tipo fuera obligatorio.</summary>
+    public TipoIdentificacion? TipoIdentificacion { get; set; }
+    /// <summary>Número sin guiones ni espacios.</summary>
     public string? Identificacion { get; set; }
     public string? Telefono { get; set; }
     public string? Correo { get; set; }
     public string? Notas { get; set; }
 
+    public string TipoIdentificacionTexto => TipoIdentificacion is { } t ? Identificaciones.Nombre(t) : "";
+    public string IdentificacionFormateada => Identificaciones.Formatear(TipoIdentificacion, Identificacion);
+
     public override string ToString() =>
-        string.IsNullOrWhiteSpace(Identificacion) ? Nombre : $"{Nombre} ({Identificacion})";
+        string.IsNullOrWhiteSpace(Identificacion) ? Nombre : $"{Nombre} ({IdentificacionFormateada})";
 }
 
 public enum EstadoOrden
@@ -185,18 +177,11 @@ public record ResumenMensual(
     long TotalCentimos,
     long BaseCentimos,
     long IvaCentimos,
-    long GastosCentimos = 0,
-    long IvaGastosCentimos = 0)
+    long GastosCentimos = 0)
 {
     public string NombreMes => Dinero.NombreMes(Mes);
 
-    /// <summary>
-    /// IVA neto a pagar = IVA cobrado − IVA de las facturas de gastos (crédito fiscal).
-    /// Negativo = saldo a favor.
-    /// </summary>
-    public long IvaNetoCentimos => IvaCentimos - IvaGastosCentimos;
-
-    /// <summary>Utilidad = ingresos netos (sin IVA) − gastos (sin el IVA de las facturas).</summary>
+    /// <summary>Utilidad = ingresos netos (sin IVA) − gastos (monto pagado).</summary>
     public long UtilidadCentimos => BaseCentimos - GastosCentimos;
 }
 
@@ -205,25 +190,14 @@ public class Gasto
 {
     public long Id { get; set; }
     public DateTime Fecha { get; set; } = DateTime.Today;
+    /// <summary>Texto libre: la escribe el usuario (se sugieren las ya usadas).</summary>
     public string Categoria { get; set; } = "";
-    public string Descripcion { get; set; } = "";
-    public string? Proveedor { get; set; }
+    public string Detalle { get; set; } = "";
     public MetodoPago Metodo { get; set; } = MetodoPago.Transferencia;
-    /// <summary>Monto total pagado (con IVA si la factura lo trae), en céntimos.</summary>
+    /// <summary>Monto total pagado, en céntimos. Es lo que resta en la utilidad.</summary>
     public long MontoCentimos { get; set; }
-    /// <summary>IVA incluido en la factura (0 si no trae o no se sabe), en céntimos.</summary>
-    public long IvaCentimos { get; set; }
 
-    /// <summary>Costo real para la utilidad: el IVA de la factura se recupera como crédito fiscal.</summary>
-    public long NetoCentimos => MontoCentimos - IvaCentimos;
     public string MetodoTexto => MetodosPago.Nombre(Metodo);
-
-    public static readonly string[] CategoriasSugeridas =
-    {
-        "Alquiler del local", "Salarios y cargas sociales", "Servicios (luz, agua, internet, teléfono)",
-        "Transporte y combustible", "Mantenimiento y reparaciones", "Compra de productos para alquilar",
-        "Limpieza y lavandería", "Publicidad", "Impuestos, patentes y permisos", "Comisiones bancarias", "Otros"
-    };
 }
 
 /// <summary>Registro de auditoría (pestaña Logs).</summary>

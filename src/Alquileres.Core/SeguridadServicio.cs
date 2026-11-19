@@ -1,127 +1,61 @@
-using System.Security.Cryptography;
-using System.Text;
-
 namespace Alquileres.Core;
 
 /// <summary>
-/// Códigos de autorización: 2 empleados (cada uno con su código personal) y un
-/// código de confirmación común. Para eliminar órdenes o editar productos y
-/// clientes se piden ambos: el de empleado identifica quién hizo el cambio
-/// (queda en Logs) y el de confirmación es la segunda llave.
+/// Código de confirmación común. Quien hace el cambio ya está identificado por la
+/// sesión (ver <see cref="UsuarioServicio"/>); el código es la aprobación y el
+/// "¿está seguro?" antes de eliminar órdenes o editar productos, clientes y gastos.
 ///
-/// Los códigos no se guardan en texto: solo un hash PBKDF2 con sal. Aun así, el
-/// archivo de datos no está cifrado; esto es control y trazabilidad, no una
-/// protección contra alguien con acceso técnico al archivo.
+/// Se guarda solo como hash PBKDF2 con sal. El archivo de datos no está cifrado:
+/// esto es control y trazabilidad, no protección contra alguien con acceso técnico.
 /// </summary>
 public class SeguridadServicio(BaseDatos db)
 {
-    public const int CantidadEmpleados = 2;
     public const int LargoMinimoCodigo = 4;
 
-    private const string ClaveConfirmacion = "seg_confirmacion";
-    private static string ClaveNombre(int n) => $"seg_empleado{n}_nombre";
-    private static string ClaveCodigo(int n) => $"seg_empleado{n}_codigo";
-
-    private const int Iteraciones = 100_000;
+    internal const string ClaveConfirmacion = "seg_confirmacion";
 
     private readonly ConfigRepositorio _config = new(db);
 
     public bool Configurado => _config.Obtener(ClaveConfirmacion) is not null;
 
-    /// <summary>Nombres de los empleados configurados (vacío si no hay configuración).</summary>
-    public List<string> NombresEmpleados() =>
-        Enumerable.Range(1, CantidadEmpleados)
-            .Select(n => _config.Obtener(ClaveNombre(n)))
-            .Where(n => !string.IsNullOrWhiteSpace(n))
-            .Select(n => n!)
-            .ToList();
-
     /// <summary>
-    /// Define (o redefine) los 3 códigos. Si ya había códigos, se exige el código
-    /// de confirmación actual.
+    /// Define o cambia el código de confirmación. Solo un administrador; si ya
+    /// existía uno, se exige el actual.
     /// </summary>
-    public void Configurar(IReadOnlyList<(string Nombre, string Codigo)> empleados, string codigoConfirmacion,
-        string? codigoConfirmacionActual = null)
+    public void DefinirConfirmacion(string nuevo, string? actual = null)
     {
-        if (Configurado && !Coincide(codigoConfirmacionActual, _config.Obtener(ClaveConfirmacion)))
+        UsuarioServicio.ExigirAdministrador(db);
+        if (Configurado && !Claves.Coincide(actual, _config.Obtener(ClaveConfirmacion)))
             throw new ReglaNegocioException("El código de confirmación actual no es correcto.");
+        GuardarConfirmacion(nuevo);
+        new LogRepositorio(db).Registrar(null, "Código de confirmación actualizado", "Seguridad", "Se definió un nuevo código de confirmación.");
+    }
 
-        if (empleados.Count != CantidadEmpleados)
-            throw new ReglaNegocioException($"Debe definir {CantidadEmpleados} empleados.");
-
-        var codigos = new List<string>();
-        for (int i = 0; i < empleados.Count; i++)
-        {
-            if (string.IsNullOrWhiteSpace(empleados[i].Nombre))
-                throw new ReglaNegocioException($"Falta el nombre del empleado {i + 1}.");
-            codigos.Add(ValidarCodigo(empleados[i].Codigo, $"El código del empleado {i + 1}"));
-        }
-        if (empleados[0].Nombre.Trim().Equals(empleados[1].Nombre.Trim(), StringComparison.OrdinalIgnoreCase))
-            throw new ReglaNegocioException("Los dos empleados deben tener nombres diferentes (así se distinguen en los logs).");
-        codigos.Add(ValidarCodigo(codigoConfirmacion, "El código de confirmación"));
-
-        if (codigos.Distinct().Count() != codigos.Count)
-            throw new ReglaNegocioException("Los 3 códigos deben ser diferentes entre sí.");
-
-        for (int i = 0; i < empleados.Count; i++)
-        {
-            _config.Guardar(ClaveNombre(i + 1), empleados[i].Nombre.Trim());
-            _config.Guardar(ClaveCodigo(i + 1), Hash(codigos[i]));
-        }
-        _config.Guardar(ClaveConfirmacion, Hash(codigos[^1]));
-
-        new LogRepositorio(db).Registrar(null, "Códigos de autorización actualizados", "Seguridad",
-            $"Empleados: {string.Join(", ", empleados.Select(e => e.Nombre.Trim()))}.");
+    /// <summary>Usado solo en la configuración inicial (antes de que exista una sesión).</summary>
+    internal void GuardarConfirmacion(string codigo)
+    {
+        string c = (codigo ?? "").Trim();
+        if (c.Length < LargoMinimoCodigo)
+            throw new ReglaNegocioException($"El código de confirmación debe tener al menos {LargoMinimoCodigo} caracteres.");
+        _config.Guardar(ClaveConfirmacion, Claves.Hash(c));
     }
 
     /// <summary>
-    /// Verifica los códigos y devuelve el nombre del empleado que autoriza.
-    /// No indica cuál de los dos códigos falló.
+    /// Verifica el código de confirmación y devuelve el nombre del usuario de la
+    /// sesión, que es quien queda en Logs.
     /// </summary>
-    public string Validar(string? codigoEmpleado, string? codigoConfirmacion)
+    public string Validar(string? codigoConfirmacion)
     {
+        var usuario = db.UsuarioActual ?? throw new ReglaNegocioException("No hay una sesión iniciada.");
         if (!Configurado)
-            throw new ReglaNegocioException("Todavía no se han configurado los códigos de autorización.");
-
-        bool confirmacionOk = Coincide(codigoConfirmacion, _config.Obtener(ClaveConfirmacion));
-        string? empleado = null;
-        for (int n = 1; n <= CantidadEmpleados; n++)
-            if (Coincide(codigoEmpleado, _config.Obtener(ClaveCodigo(n))))
-                empleado = _config.Obtener(ClaveNombre(n));
-
-        if (!confirmacionOk || empleado is null)
-            throw new ReglaNegocioException("El código de empleado o el de confirmación no es correcto.");
-        return empleado;
+            throw new ReglaNegocioException("Todavía no se ha configurado el código de confirmación.");
+        if (!Claves.Coincide(codigoConfirmacion, _config.Obtener(ClaveConfirmacion)))
+            throw new ReglaNegocioException("El código de confirmación no es correcto.");
+        return usuario.Nombre;
     }
 
     /// <summary>Deja constancia en Logs de un intento fallido.</summary>
     public void RegistrarIntentoFallido(string accion) =>
         new LogRepositorio(db).Registrar(null, "Autorización rechazada", "Seguridad",
-            $"Códigos incorrectos al intentar: {accion}.");
-
-    private static string ValidarCodigo(string? codigo, string nombre)
-    {
-        string c = (codigo ?? "").Trim();
-        if (c.Length < LargoMinimoCodigo)
-            throw new ReglaNegocioException($"{nombre} debe tener al menos {LargoMinimoCodigo} caracteres.");
-        return c;
-    }
-
-    private static string Hash(string codigo)
-    {
-        byte[] sal = RandomNumberGenerator.GetBytes(16);
-        byte[] h = Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(codigo), sal, Iteraciones, HashAlgorithmName.SHA256, 32);
-        return $"{Convert.ToBase64String(sal)}:{Convert.ToBase64String(h)}";
-    }
-
-    private static bool Coincide(string? codigo, string? guardado)
-    {
-        if (string.IsNullOrWhiteSpace(codigo) || string.IsNullOrEmpty(guardado)) return false;
-        var partes = guardado.Split(':');
-        if (partes.Length != 2) return false;
-        byte[] sal = Convert.FromBase64String(partes[0]);
-        byte[] esperado = Convert.FromBase64String(partes[1]);
-        byte[] h = Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(codigo.Trim()), sal, Iteraciones, HashAlgorithmName.SHA256, esperado.Length);
-        return CryptographicOperations.FixedTimeEquals(h, esperado);
-    }
+            $"Código de confirmación incorrecto al intentar: {accion}.");
 }

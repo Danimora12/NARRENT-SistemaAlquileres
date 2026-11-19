@@ -8,7 +8,7 @@ namespace Alquileres.Core;
 /// </summary>
 public class BaseDatos
 {
-    private const int VersionEsquema = 3;
+    private const int VersionEsquema = 5;
 
     public string RutaArchivo { get; }
 
@@ -16,6 +16,12 @@ public class BaseDatos
     {
         RutaArchivo = Path.GetFullPath(rutaArchivo);
     }
+
+    /// <summary>
+    /// Usuario con la sesión iniciada (null antes del login). Todo lo que se
+    /// registra en Logs queda a su nombre. Lo asigna <see cref="UsuarioServicio"/>.
+    /// </summary>
+    public Usuario? UsuarioActual { get; internal set; }
 
     /// <summary>
     /// Carpeta por defecto: %LOCALAPPDATA%\SistemaAlquileres. Se conserva el nombre
@@ -53,17 +59,112 @@ public class BaseDatos
     /// de versiones anteriores paso a paso (v1 → v2). Cada paso va en su propia
     /// transacción: si algo falla, la base queda como estaba.
     /// </summary>
-    public void Inicializar()
+    public void Inicializar() => Inicializar(VersionEsquema);
+
+    /// <summary>Actualiza solo hasta la versión indicada (para probar migraciones desde versiones viejas).</summary>
+    internal void Inicializar(int hastaVersion)
     {
         Directory.CreateDirectory(CarpetaDatos);
         using var cn = Abrir();
 
         long version = Escalar<long>(cn, "PRAGMA user_version;");
-        if (version >= VersionEsquema) return;
+        if (version >= hastaVersion) return;
 
-        if (version < 1) Migrar(cn, 1, CrearEsquemaV1);
-        if (version < 2) Migrar(cn, 2, MigrarAV2);
-        if (version < 3) Migrar(cn, 3, MigrarAV3);
+        if (version < 1 && hastaVersion >= 1) Migrar(cn, 1, CrearEsquemaV1);
+        if (version < 2 && hastaVersion >= 2) Migrar(cn, 2, MigrarAV2);
+        if (version < 3 && hastaVersion >= 3) Migrar(cn, 3, MigrarAV3);
+        if (version < 4 && hastaVersion >= 4) Migrar(cn, 4, MigrarAV4);
+        if (version < 5 && hastaVersion >= 5) Migrar(cn, 5, MigrarAV5);
+    }
+
+    /// <summary>
+    /// v5: tipo de identificación de clientes (único por número), código de producto,
+    /// se quitan las características de inventario y los gastos pierden proveedor e IVA.
+    /// </summary>
+    private static void MigrarAV5(SqliteConnection cn, SqliteTransaction tx)
+    {
+        var notas = new List<string>();
+
+        // Clientes: tipo de identificación. Los clientes viejos quedan sin tipo hasta que se editen.
+        Ejecutar(cn, tx, """
+            ALTER TABLE clientes ADD COLUMN tipo_identificacion TEXT
+                CHECK (tipo_identificacion IN ('CedulaFisica','CedulaJuridica','Dimex','Nite','Pasaporte'));
+            CREATE UNIQUE INDEX ux_clientes_identificacion ON clientes(identificacion) WHERE tipo_identificacion IS NOT NULL;
+            """);
+
+        // Productos: código. Se asigna a los existentes en orden de creación.
+        Ejecutar(cn, tx, "ALTER TABLE productos ADD COLUMN codigo TEXT;");
+        var productos = new List<(long Id, string Nombre)>();
+        using (var cmd = cn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "SELECT id, nombre FROM productos ORDER BY id;";
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) productos.Add((r.GetInt64(0), r.GetString(1)));
+        }
+        foreach (var (id, nombre) in productos)
+        {
+            string codigo = ProductoRepositorio.SiguienteCodigo(cn, tx, nombre);
+            using var cmd = cn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "UPDATE productos SET codigo = $c WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$c", codigo);
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.ExecuteNonQuery();
+        }
+        Ejecutar(cn, tx, "CREATE UNIQUE INDEX ux_productos_codigo ON productos(codigo);");
+        if (productos.Count > 0) notas.Add($"se asignó código a {productos.Count} productos");
+
+        // Sin características de inventario: el inventario de cada producto ya era la suma.
+        long conVariantes = Escalar<long>(cn, "SELECT COUNT(DISTINCT producto_id) FROM producto_variantes;", tx);
+        Ejecutar(cn, tx, "DROP INDEX IF EXISTS ix_variantes_producto; DROP TABLE producto_variantes;");
+        if (conVariantes > 0) notas.Add($"se quitaron las características de {conVariantes} productos (su inventario total se conserva)");
+
+        // Gastos: descripción → detalle; el proveedor se agrega al detalle para no perderlo; sin IVA.
+        long conIva = Escalar<long>(cn, "SELECT COUNT(*) FROM gastos WHERE iva > 0;", tx);
+        long conProveedor = Escalar<long>(cn, "SELECT COUNT(*) FROM gastos WHERE trim(coalesce(proveedor, '')) <> '';", tx);
+        Ejecutar(cn, tx, """
+            ALTER TABLE gastos RENAME COLUMN descripcion TO detalle;
+            UPDATE gastos SET detalle = detalle || ' · Proveedor: ' || trim(proveedor) WHERE trim(coalesce(proveedor, '')) <> '';
+            ALTER TABLE gastos DROP COLUMN proveedor;
+            ALTER TABLE gastos DROP COLUMN iva;
+            """);
+        if (conProveedor > 0) notas.Add($"el proveedor de {conProveedor} gastos se pasó al detalle");
+        if (conIva > 0) notas.Add($"{conIva} gastos tenían IVA de factura anotado: ahora cuentan por el monto completo en la utilidad");
+
+        if (notas.Count > 0)
+            LogRepositorio.Registrar(null, cn, tx, null, "Actualización: clientes, productos y gastos", "Sistema",
+                char.ToUpper(notas[0][0]) + string.Join("; ", notas)[1..] + ".");
+    }
+
+    /// <summary>
+    /// v4: usuarios con inicio de sesión. Los 2 empleados de los códigos anteriores
+    /// pasan a ser administradores (contraseña inicial = su código de empleado, que
+    /// deben cambiar al entrar). El código de confirmación se conserva.
+    /// </summary>
+    private static void MigrarAV4(SqliteConnection cn, SqliteTransaction tx)
+    {
+        Ejecutar(cn, tx, """
+            CREATE TABLE usuarios (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario             TEXT    NOT NULL UNIQUE,           -- en minúsculas
+                nombre              TEXT    NOT NULL,
+                correo              TEXT,
+                clave_hash          TEXT    NOT NULL,                  -- PBKDF2 "sal:hash"
+                rol                 TEXT    NOT NULL CHECK (rol IN ('Administrador','Empleado')),
+                activo              INTEGER NOT NULL DEFAULT 1,
+                debe_cambiar_clave  INTEGER NOT NULL DEFAULT 0,
+                creado_en           TEXT    NOT NULL,
+                ultimo_acceso       TEXT
+            );
+            """);
+
+        var creados = UsuarioServicio.MigrarEmpleados(cn, tx);
+        if (creados.Count > 0)
+            LogRepositorio.Registrar(null, cn, tx, null, "Actualización: inicio de sesión", "Sistema",
+                "Los códigos de empleado se convirtieron en usuarios administradores: " +
+                string.Join(", ", creados.Select(c => $"{c.Nombre} (usuario {c.Usuario})")) +
+                ". La contraseña inicial es su código de empleado anterior y deben cambiarla al entrar.");
     }
 
     /// <summary>v3: registro de gastos de la empresa (para la utilidad del flujo de caja).</summary>
@@ -231,7 +332,7 @@ public class BaseDatos
         Ejecutar(cn, tx, "CREATE UNIQUE INDEX ux_ordenes_numero ON ordenes(numero);");
 
         // El inventario se pone en 0 y el cliente lo completa en Productos.
-        LogRepositorio.Registrar(cn, tx, null, "Actualización a NARRENT v2", "Sistema",
+        LogRepositorio.Registrar(null, cn, tx, null, "Actualización a NARRENT v2", "Sistema",
             existentes.Count == 0
                 ? "Base de datos actualizada."
                 : $"Base de datos actualizada. Se renumeraron {existentes.Count} órdenes existentes con el formato año-mes-consecutivo.");
