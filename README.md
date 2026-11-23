@@ -1,117 +1,157 @@
 # NARRENT
 
-Programa de escritorio para Windows que registra órdenes de alquiler, los pagos y abonos de cada orden, el inventario de los productos, los gastos de la empresa y el flujo de caja mensual con el IVA y la utilidad. Funciona sin internet y no hay que instalar ninguna base de datos.
+Sistema de escritorio para Windows que administra un negocio de alquiler de artículos: órdenes de alquiler, pagos y abonos, inventario, clientes, gastos y flujo de caja mensual con el IVA y la utilidad.
 
-**Versión 2.0** (antes "Sistema de Alquileres").
+Funciona sin conexión a internet y no requiere instalar un motor de base de datos: toda la información se guarda en un archivo SQLite local.
 
-- **Tecnología:** C# · .NET 10 (LTS, con soporte hasta noviembre de 2028) · WinForms · SQLite (archivo local) · ClosedXML (exportación a Excel)
+**Versión actual: 2.1.0**
 
-## Estructura
+| | |
+|---|---|
+| **Lenguaje y plataforma** | C# · .NET 10 (LTS) · Windows Forms |
+| **Datos** | SQLite (`Microsoft.Data.Sqlite`) |
+| **Exportación** | Excel con ClosedXML |
+| **Pruebas** | xUnit (56 métodos de prueba) |
+| **Distribución** | Un solo `.exe` autocontenido; el usuario no instala nada |
+
+---
+
+## Funcionalidades
+
+**Operación**
+- Registro de órdenes de alquiler con varias líneas (producto, cantidad, días y precio) y descuento opcional por orden o por línea.
+- Pagos adelantados, abonos y cancelación del saldo, con método de pago (SINPE Móvil, transferencia, efectivo o tarjeta).
+- Anulación de órdenes con motivo, y eliminación con posibilidad de restaurarlas.
+- Catálogos de productos (con código automático e inventario) y de clientes (con validación de identificación de Costa Rica).
+
+**Finanzas**
+- Registro de gastos por categoría.
+- Flujo de caja mensual y anual: ingresos brutos, ingresos netos, IVA cobrado, gastos y utilidad.
+- Exportación del flujo de caja a Excel.
+
+**Administración y seguridad**
+- Inicio de sesión con usuarios y dos roles (Administrador y Empleado).
+- Código de confirmación para las acciones sensibles.
+- Registro de actividad (auditoría) de todos los cambios, que no se puede editar ni borrar.
+- Respaldos automáticos al cerrar el programa y restauración desde la aplicación.
+
+---
+
+## Arquitectura
+
+La solución separa la lógica de negocio de la interfaz, para que las reglas se puedan probar sin abrir ventanas.
 
 ```
 SistemaAlquileres.sln
-├── src/Alquileres.Core     → lógica de negocio (sin pantallas): modelos, base de datos, IVA, reportes, respaldos
-├── src/Alquileres.App      → pantallas WinForms (el .exe)
-└── tests/Alquileres.Tests  → pruebas automáticas (xUnit)
+├── src/Alquileres.Core     → lógica de negocio: modelos, acceso a datos, IVA, reportes, seguridad y respaldos
+├── src/Alquileres.App      → interfaz Windows Forms (genera NARRENT.exe)
+└── tests/Alquileres.Tests  → pruebas automáticas de Alquileres.Core (xUnit)
 ```
 
-| Archivo | Qué contiene |
+`Alquileres.App` depende de `Alquileres.Core`; `Alquileres.Core` no conoce la interfaz.
+
+### Alquileres.Core
+
+| Archivo | Responsabilidad |
 |---|---|
-| `Core/CalculadoraIva.cs` | IVA incluido (base = total / 1,13; IVA = total − base) y descuentos por línea |
-| `Core/BaseDatos.cs` | Crea el archivo SQLite y actualiza bases viejas paso a paso (v1 → v5); guarda el usuario de la sesión |
-| `Core/Repositorios.cs` | Productos e inventario, clientes, órdenes, pagos y configuración |
-| `Core/Auditoria.cs` | Logs (registro de cambios) y número de orden año-mes-consecutivo |
-| `Core/Identificacion.cs` | Tipos de identificación de Costa Rica: formato, validación y presentación con guiones |
-| `Core/Usuarios.cs` | Usuarios, roles, inicio de sesión, contraseñas temporales y migración desde los códigos de empleado |
-| `Core/SeguridadServicio.cs` | Código de confirmación (guardado con hash, no en texto) |
-| `Core/Claves.cs` | Hash PBKDF2 con sal para contraseñas y códigos |
-| `Core/GastoRepositorio.cs` | Gastos de la empresa |
-| `Core/ReporteServicio.cs` | Flujo de caja mensual y anual (con gastos y utilidad) + exportación a Excel |
-| `Core/RespaldoServicio.cs` | Respaldos automáticos (`VACUUM INTO`) y restauración |
-| `App/Controles.cs` | Campo de monto sin decimales y campo numérico con botones − / + |
-| `App/Pantallas/*` | Login, Nueva orden, Órdenes, Productos, Clientes, Gastos, Flujo de caja, Respaldos, Logs, Usuarios y sus ventanas |
+| `Modelos.cs` | Entidades del dominio: órdenes, líneas, pagos, productos, clientes, gastos |
+| `BaseDatos.cs` | Crea el archivo SQLite y migra el esquema versión por versión (`PRAGMA user_version`, actualmente v5) |
+| `Repositorios.cs` | Acceso a datos de productos, clientes, órdenes, pagos y configuración |
+| `GastoRepositorio.cs` | Acceso a datos de gastos |
+| `CalculadoraIva.cs` | Cálculo del IVA incluido en el precio y de los descuentos |
+| `Dinero.cs` | Manejo de montos como enteros en céntimos |
+| `Identificacion.cs` | Tipos de identificación de Costa Rica: formato, validación y presentación |
+| `Auditoria.cs` | Registro de actividad y número de orden consecutivo por mes |
+| `Usuarios.cs` | Usuarios, roles, inicio de sesión y contraseñas temporales |
+| `SeguridadServicio.cs` | Código de confirmación para acciones sensibles |
+| `Claves.cs` | Hash de contraseñas con PBKDF2-SHA256 y sal aleatoria |
+| `ReporteServicio.cs` | Flujo de caja mensual y anual, y exportación a Excel |
+| `RespaldoServicio.cs` | Respaldos con `VACUUM INTO` y restauración |
 
-## Cómo abrirlo y ejecutarlo
+### Alquileres.App
 
-1. Instalar **Visual Studio 2026** (o 2022 actualizado) con la carga de trabajo *Desarrollo de escritorio de .NET*, o el **SDK de .NET 10**.
-2. Abrir `SistemaAlquileres.sln`.
-3. Elegir `Alquileres.App` como proyecto de inicio y presionar **F5**.
-
-Para correr las pruebas: `dotnet test` en la carpeta raíz.
-
-## Cómo generar el .exe para el cliente
-
-La configuración está guardada en el perfil `src/Alquileres.App/Properties/PublishProfiles/Cliente.pubxml`. **No hay que elegir opciones a mano.**
-
-- **Visual Studio:** clic derecho en `Alquileres.App` → **Publicar…** → perfil **Cliente** → **Publicar**.
-- **Por comando** (desde la carpeta de la solución): `dotnet publish src/Alquileres.App -p:PublishProfile=Cliente`
-
-El resultado es **un solo archivo**: `D:\Daniel\SistemaAlquileres\publicar\NARRENT.exe` (≈ 55 MB). Incluye .NET 10, SQLite y el ícono. El cliente no tiene que instalar nada: se copia el `.exe` a su computadora (por ejemplo a `C:\SistemaAlquileres\`) y se le crea un acceso directo en el escritorio.
-
-Antes de cada entrega, probá el `.exe` en una computadora que no tenga Visual Studio.
-
-Para actualizar al cliente basta con reemplazar el `.exe`: los datos están en otra carpeta y no se pierden.
-
-### Pasar al cliente de la v1 a NARRENT (v2)
-
-1. Cerrar el programa viejo (al cerrar se crea un respaldo automático).
-2. Copiar `NARRENT.exe` junto al viejo, **cambiar el acceso directo del escritorio** para que apunte a `NARRENT.exe` y borrar `SistemaAlquileres.exe`.
-3. Abrir NARRENT: la base se actualiza sola y las órdenes existentes se renumeran con el formato nuevo (queda constancia en *Logs*). Las órdenes de la v1 aparecen *sin pago*: si ya estaban pagadas, registrar el pago desde el detalle.
-4. Al abrir por primera vez aparece la *Configuración inicial*: crear el primer administrador y el código de confirmación **con el cliente presente**. Los demás usuarios se crean en la pestaña *Usuarios*.
-5. Completar el inventario en *Productos*.
-
-## Dónde quedan los datos
-
-| Qué | Dónde |
+| Archivo | Responsabilidad |
 |---|---|
-| Base de datos | `%LOCALAPPDATA%\SistemaAlquileres\datos.db` |
-| Respaldos automáticos | `%LOCALAPPDATA%\SistemaAlquileres\Respaldos\` (se conservan los últimos 30) |
-| Respaldo adicional | La carpeta que se configure en la pestaña *Respaldos* (recomendado: OneDrive o Google Drive) |
+| `FormPrincipal.cs` | Ventana principal con barra lateral (Operación, Finanzas, Administración) |
+| `Tema.cs` | Paleta de colores del sistema visual |
+| `Ui.cs` | Ayudantes para construir pantallas: tipografía, botones, campos, tarjetas, tablas e indicadores |
+| `Componentes.cs` | Controles dibujados a mano: botón redondeado, tarjeta, tabla con etiquetas de estado, selector segmentado, gráfico de barras, avisos, íconos y logo |
+| `Controles.cs` | Campo de monto y campo numérico con botones − / + |
+| `Pantallas/` | Inicio de sesión, órdenes, productos, clientes, gastos, flujo de caja, respaldos, registro de actividad y usuarios |
 
-Cada vez que se cierra el programa se crea un respaldo. **Configurá la carpeta adicional en la computadora del cliente el día de la instalación**: si el disco se daña, esa es la única copia que queda fuera del equipo.
+---
 
-## Reglas de negocio
+## Decisiones de diseño
 
-- **Los precios incluyen el IVA del 13 %.** El IVA no es el 13 % del total sino total × 13/113 (≈ 11,50 %). Ejemplo: de ₡113.000, la base es ₡100.000 y el IVA ₡13.000.
-- **Total de cada línea** = precio unitario × cantidad × días. Si el producto se cobra por alquiler y no por día, se deja *días = 1*.
-- **Cada línea guarda su precio y su IVA al momento de la orden.** Cambiar un precio después no altera las órdenes anteriores.
-- **Los montos se guardan como enteros en céntimos.** Las sumas son exactas (no se usa `double`).
-- **Número de orden = año + mes + consecutivo del mes** (ej. `202612001`), según la *fecha de la orden*. Si un mes pasara de 999 órdenes, el número crece a 4 dígitos; nunca se repite.
-- **Descuento de 1 % a 15 %**, a toda la orden o a un solo producto, al confirmar la orden. Se redondea al colón y el IVA se calcula sobre el monto ya descontado. Después de confirmada, el descuento no se cambia.
-- **Pagos:** al confirmar se registra el pago adelantado (SINPE Móvil, transferencia, efectivo o tarjeta). Los abonos y la cancelación del saldo se registran en el detalle de la orden. No se puede pagar más que el saldo ni pagar órdenes anuladas.
-- **Anular ≠ eliminar.** *Anular* deja la orden visible (tachada) con su motivo. *Eliminar* es para órdenes fantasma o de prueba: la manda a *Órdenes eliminadas*, de donde se puede restaurar con su mismo número. En ambos casos deja de contar en el flujo de caja.
-- **Inicio de sesión:** cada persona entra con su usuario y contraseña. La sesión no se cierra sola; el botón *Bloquear / Cambiar usuario* (arriba a la derecha) la cierra y pide ingresar de nuevo. No hay bloqueo por intentos fallidos, pero cada intento fallido queda en *Logs*.
-- **Usuarios:** nadie se registra solo; los crea un administrador con una contraseña temporal que la persona cambia al entrar por primera vez. Si alguien olvida su contraseña, un administrador se la restablece (*Usuarios → Restablecer contraseña*). Los usuarios no se borran, se desactivan, para conservar el historial. Siempre debe quedar al menos un administrador activo.
-- **Roles:** *Administrador* maneja todo el sistema, incluidos usuarios y código de confirmación. *Empleado* usa el sistema pero no administra usuarios ni el código.
-- **Acciones que piden el código de confirmación:** eliminar y restaurar órdenes, eliminar un pago, crear/editar/activar productos, editar inventario, editar y eliminar clientes, editar y eliminar gastos, y crear, editar o restablecer usuarios. Es la aprobación y el "¿está seguro?" del cambio; quien lo hace es el usuario de la sesión. Tras 3 intentos fallidos la acción se cancela y el intento queda registrado.
-- **Logs:** cada cambio (órdenes, pagos, notas, productos, inventario, clientes, gastos, usuarios, inicios de sesión) queda registrado con fecha, acción, detalle *antes → después* y el usuario que tenía la sesión iniciada. El programa no permite editar ni borrar logs.
-- **Clientes:** el tipo de identificación (cédula física, cédula jurídica, DIMEX, NITE o pasaporte) y el número son obligatorios. El número se valida con el formato del tipo, se guarda sin guiones y no puede repetirse (aunque se escriba con guiones o con otro tipo). Los clientes registrados antes de esta regla aparecen como *Sin tipo* y deben completarla la próxima vez que se editen. Cédula jurídica acepta las que empiezan con 2, 3 o 4 (Gobierno, personas jurídicas e instituciones autónomas).
-- **Código de producto:** las 3 primeras letras del nombre, sin tildes, + un consecutivo de 3 dígitos por prefijo (*Manteles* → `MAN001`, *Mantas* → `MAN002`). Se asigna solo al crear el producto y no cambia si se cambia el nombre. Solo un administrador puede escribirlo a mano (3 a 15 letras, números o guion). No se repite.
-- **Inventario:** cada producto tiene una cantidad. Es el inventario que se tiene, no la disponibilidad por fecha.
-- **Gastos:** fecha, categoría, detalle, método y monto pagado. La categoría la escribe el usuario (se sugieren las ya usadas; si se escribe una existente con otras mayúsculas o espacios, se usa la existente). Registrar no pide código; editar y eliminar sí.
-- **Utilidad = ingresos netos (sin IVA) − gastos (monto pagado)**, por mes. Es antes del impuesto sobre la renta. Los ingresos van por fecha de la orden y los gastos por su propia fecha.
-- **El mes del flujo de caja lo define la *fecha de la orden*.** No cuentan las órdenes anuladas ni las eliminadas.
-- **Flujo de caja:** *Ingresos brutos* = cobrado con IVA (ya con descuentos); *Ingresos netos* = sin IVA; *Total IVA 13 %* = IVA cobrado (débito fiscal). El IVA a pagar en el formulario 150 de TRIBU-CR es ese monto menos el IVA de las compras del negocio (crédito fiscal), que este sistema no registra.
-- **Este sistema no emite factura electrónica.** Si el cliente está inscrito en Hacienda, debe seguir facturando con TicoFactura o con un facturador autorizado. Este programa sirve como control interno y para conciliar.
+| Decisión | Motivo |
+|---|---|
+| **Montos guardados como enteros en céntimos** | Evita los errores de redondeo de `double`; las sumas del flujo de caja son exactas |
+| **Cada línea guarda su precio e IVA al momento de la orden** | Cambiar un precio después no altera las órdenes ni los reportes anteriores |
+| **IVA incluido: IVA = total × 13/113** | Los precios del negocio ya incluyen el 13 %; el IVA no es el 13 % del total |
+| **Migraciones de esquema versionadas** | Las bases de versiones anteriores se actualizan solas al abrir el programa, sin perder datos |
+| **Contraseñas con PBKDF2-SHA256, sal y comparación en tiempo constante** | Nunca se guarda la contraseña ni el código en texto |
+| **Anular ≠ eliminar** | Anular conserva la orden visible con su motivo; eliminar la oculta pero se puede restaurar con su mismo número |
+| **Usuarios desactivados, no borrados** | Se conserva el historial del registro de actividad |
+| **Registro de actividad con valores antes → después** | Trazabilidad de quién cambió qué y cuándo |
+| **SQLite local y `.exe` autocontenido** | El negocio no necesita servidor, internet ni instalar dependencias |
 
-## Si se olvidan contraseñas o el código
+---
 
-- **Una persona olvidó su contraseña:** otro administrador se la restablece en *Usuarios*.
-- **Todos los administradores olvidaron su contraseña** (solo el técnico): hacer un respaldo, cerrar el programa, abrir `datos.db` con [DB Browser for SQLite](https://sqlitebrowser.org/) y ejecutar `DELETE FROM usuarios;`. Al abrir NARRENT aparece la configuración inicial para crear un administrador nuevo, que vuelve a crear a los demás. Los Logs conservan los nombres anteriores.
-- **Se perdió el código de confirmación** (solo el técnico): con el mismo procedimiento ejecutar `DELETE FROM config WHERE clave = 'seg_confirmacion';`. La próxima acción protegida le pedirá a un administrador definir uno nuevo.
+## Reglas de negocio principales
 
-### Actualización a v5 (clientes, productos y gastos)
+- **Total de cada línea** = precio unitario × cantidad × días (si el producto se cobra por alquiler, días = 1).
+- **Número de orden** = año + mes + consecutivo del mes (ej. `202612001`), según la fecha de la orden. Nunca se repite.
+- **Descuento** de 1 % a 15 %, a toda la orden o a una línea. Se redondea al colón y el IVA se calcula sobre el monto ya descontado.
+- **Pagos:** no se puede pagar más que el saldo ni registrar pagos en órdenes anuladas.
+- **Clientes:** tipo y número de identificación obligatorios (cédula física, cédula jurídica, DIMEX, NITE o pasaporte), validados según el tipo y sin repetirse.
+- **Código de producto:** las 3 primeras letras del nombre sin tildes + consecutivo (*Manteles* → `MAN001`).
+- **Utilidad mensual** = ingresos netos (sin IVA) − gastos. Las órdenes anuladas o eliminadas no cuentan.
+- **Roles:** el Administrador maneja todo el sistema, incluidos usuarios; el Empleado opera pero no administra usuarios ni el código de confirmación.
+- **Acciones con código de confirmación:** eliminar o restaurar órdenes, eliminar pagos, modificar productos e inventario, editar o eliminar clientes y gastos, y administrar usuarios. Tras 3 intentos fallidos la acción se cancela y queda registrada.
 
-Al abrir esta versión: cada producto recibe su código; se quitan las características de inventario (el inventario total de cada producto se conserva); en los gastos, *Descripción* pasa a llamarse *Detalle*, el proveedor que tuviera se agrega al final del detalle y se elimina el IVA de la factura, así que esos gastos pasan a restar su monto completo en la utilidad. Todo queda resumido en *Logs*.
+---
 
-### Paso de los códigos de empleado (v3) al inicio de sesión (v4)
+## Cómo ejecutarlo
 
-Al abrir la versión con login, los 2 empleados que tenían código pasan a ser **usuarios administradores**: usuario = primer nombre + último apellido sin tildes (ej. *María José Pérez* → `maria.perez`), contraseña inicial = **su código de empleado de siempre**. El sistema les pide cambiarla al entrar. El código de confirmación no cambia. Los usuarios creados quedan anotados en *Logs*.
+**Requisitos:** Visual Studio 2026 con la carga de trabajo *Desarrollo de escritorio de .NET*, o el SDK de .NET 10.
 
-**Limitación honesta:** contraseñas y código se guardan con hash, pero el archivo de datos no está cifrado. Son control y trazabilidad entre usuarios, no protección contra alguien con acceso técnico a la computadora. Restaurar un respaldo viejo también restaura los usuarios y contraseñas que había en esa fecha.
+1. Clonar el repositorio y abrir `SistemaAlquileres.sln`.
+2. Establecer `Alquileres.App` como proyecto de inicio.
+3. Ejecutar con **F5**. La primera vez aparece la configuración inicial para crear el administrador y el código de confirmación.
 
-## Ideas para una versión 3
+**Pruebas:**
 
-- Disponibilidad por fecha (cuántas unidades de cada producto/color están alquiladas en un rango), eligiendo la característica en la orden.
-- Flujo de caja por fecha de pago (dinero realmente recibido por mes y por método), además del actual por fecha de orden.
-- Comprobante o recibo imprimible de cada orden (PDF).
+```
+dotnet test
+```
+
+**Generar el ejecutable:**
+
+```
+dotnet publish src/Alquileres.App -p:PublishProfile=Cliente
+```
+
+El perfil `Cliente.pubxml` genera un único `NARRENT.exe` autocontenido (≈ 55 MB) que incluye .NET 10 y SQLite.
+
+**Ubicación de los datos:** `%LOCALAPPDATA%\SistemaAlquileres\datos.db`, con respaldos automáticos en la subcarpeta `Respaldos` (se conservan los últimos 30).
+
+---
+
+## Limitaciones conocidas
+
+- Las contraseñas y el código se guardan con hash, pero el archivo de datos no está cifrado. Es control y trazabilidad entre usuarios, no protección frente a alguien con acceso técnico a la computadora.
+- No emite factura electrónica; funciona como control interno. El IVA a pagar ante Hacienda requiere además el IVA de las compras, que el sistema no registra.
+- El inventario es la cantidad total por producto, no la disponibilidad por fecha.
+
+## Próximas mejoras
+
+- Disponibilidad de inventario por rango de fechas.
+- Flujo de caja por fecha de pago, además del actual por fecha de la orden.
+- Comprobante imprimible de cada orden en PDF.
+- Tema oscuro (la paleta ya está preparada en `Tema.cs`).
+
+---
+
+La instalación en el cliente, la actualización desde versiones anteriores y la recuperación de contraseñas están en [docs/OPERACION.md](docs/OPERACION.md).
+
+**Autor:** Daniel Mora Víquez
